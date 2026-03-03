@@ -999,6 +999,68 @@ export async function buildProfileTemplateData(storage, config, kv) {
   data.customGroups = customGroups;
   data.hasCustomGroups = customGroups.length > 0;
 
+  // Merge foaf:knows triples with AP followers/following into a deduplicated connections list
+  const FOAF_KNOWS_IRI = PREFIXES.foaf + 'knows';
+  const foafKnowsKey = predicateToKey(FOAF_KNOWS_IRI, mergedPrefixes);
+  const foafKnowsEntries = (data[foafKnowsKey + '_list'] || []).map(entry => ({
+    value: entry.value,
+    isLink: entry.isLink,
+    source: 'profile',
+    isProfile: true,
+    isFollower: false,
+    isFollowing: false,
+  }));
+
+  const seenUris = new Set(foafKnowsEntries.map(e => e.value));
+  const connectionsList = [...foafKnowsEntries];
+
+  if (kv) {
+    const [followingRaw, followersRaw] = await Promise.all([
+      kv.get(`ap_following:${config.username}`),
+      kv.get(`ap_followers:${config.username}`),
+    ]);
+    const apFollowing = JSON.parse(followingRaw || '[]');
+    const apFollowers = JSON.parse(followersRaw || '[]');
+
+    for (const uri of apFollowing) {
+      if (seenUris.has(uri)) {
+        const existing = connectionsList.find(e => e.value === uri);
+        if (existing) existing.isFollowing = true;
+      } else {
+        seenUris.add(uri);
+        connectionsList.push({
+          value: uri,
+          isLink: uri.startsWith('http://') || uri.startsWith('https://'),
+          source: 'following',
+          isProfile: false,
+          isFollower: false,
+          isFollowing: true,
+        });
+      }
+    }
+
+    for (const uri of apFollowers) {
+      if (seenUris.has(uri)) {
+        const existing = connectionsList.find(e => e.value === uri);
+        if (existing) existing.isFollower = true;
+      } else {
+        seenUris.add(uri);
+        connectionsList.push({
+          value: uri,
+          isLink: uri.startsWith('http://') || uri.startsWith('https://'),
+          source: 'follower',
+          isProfile: false,
+          isFollower: true,
+          isFollowing: false,
+        });
+      }
+    }
+  }
+
+  data.connections_list = connectionsList;
+  data.has_connections = connectionsList.length > 0;
+  data.connections_count = connectionsList.length;
+
   return data;
 }
 

@@ -207,6 +207,18 @@ export async function handleProfileUpdate(reqCtx) {
     });
   }
 
+  // Convert foaf:knows connection inputs into triples
+  const foafKnowsUris = formData.getAll('foaf_knows_uri[]');
+  for (const uri of foafKnowsUris) {
+    const trimmed = uri.trim();
+    if (!trimmed) continue;
+    newCustomTriples.push({
+      subject: iri(webId),
+      predicate: iri(PREFIXES.foaf + 'knows'),
+      object: iri(trimmed),
+    });
+  }
+
   // Combine: system triples (preserved) + new editable + new custom + other-subject triples
   const finalTriples = [
     ...systemTriples,
@@ -337,6 +349,26 @@ async function buildEditorData(storage, config, env) {
     }
   }
 
+  // Separate foaf:knows triples from customTriples
+  const FOAF_KNOWS_IRI = PREFIXES.foaf + 'knows';
+  data.foafKnowsList = data.customTriples
+    .filter(ct => ct.predicate === FOAF_KNOWS_IRI)
+    .map(ct => ({ uri: ct.object }));
+  data.customTriples = data.customTriples
+    .filter(ct => ct.predicate !== FOAF_KNOWS_IRI);
+
+  // Load AP followers/following data
+  const [followersRaw, followingRaw] = await Promise.all([
+    env.APPDATA.get(`ap_followers:${config.username}`),
+    env.APPDATA.get(`ap_following:${config.username}`),
+  ]);
+  data.apFollowing = JSON.parse(followingRaw || '[]').map(uri => ({ uri }));
+  data.hasApFollowing = data.apFollowing.length > 0;
+  data.apFollowingCount = data.apFollowing.length;
+  data.apFollowers = JSON.parse(followersRaw || '[]').map(uri => ({ uri }));
+  data.hasApFollowers = data.apFollowers.length > 0;
+  data.apFollowersCount = data.apFollowers.length;
+
   data.hasSystemTriples = data.systemTriples.length > 0;
   data.prefixesJson = JSON.stringify(mergedPrefixes);
 
@@ -369,6 +401,11 @@ async function buildEditorData(storage, config, env) {
     { key: 'domain', label: 'Domain' },
     { key: 'baseUrl', label: 'Base URL' },
   ];
+  // Add connections template keys
+  profileFields.push(
+    { key: 'connections_list', label: 'Connections (list)' },
+    { key: 'has_connections', label: 'Has connections (conditional)' },
+  );
   // Add custom triple keys dynamically
   for (const ct of data.customTriples) {
     if (ct.templateKey) {

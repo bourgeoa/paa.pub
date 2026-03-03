@@ -78,6 +78,40 @@
   </details>
 
   <details class="card">
+    <summary><h2>Connections</h2></summary>
+    <p class="text-muted mb-075">People you know (<code>foaf:knows</code>). Add WebIDs or profile URIs. ActivityPub followers and following are included automatically.</p>
+
+    <h3 class="mb-05">foaf:knows</h3>
+    <div id="foaf-knows-editor">
+      {{#foafKnowsList}}
+      <div class="fk-row flex gap-05 items-center mb-025">
+        <input type="url" name="foaf_knows_uri[]" value="{{uri}}" placeholder="https://example.com/profile#me" class="flex-1 mono">
+        <button type="button" class="btn btn-secondary btn-compact fk-remove">Remove</button>
+      </div>
+      {{/foafKnowsList}}
+    </div>
+    <button type="button" class="btn btn-secondary mt-05" id="fk-add">Add Connection</button>
+
+    {{#hasApFollowing}}
+    <h3 class="mt-1 mb-05">Following ({{apFollowingCount}})</h3>
+    <ul class="list-plain">
+      {{#apFollowing}}
+      <li class="list-row"><span class="mono flex-1 text-sm truncate">{{uri}}</span></li>
+      {{/apFollowing}}
+    </ul>
+    {{/hasApFollowing}}
+
+    {{#hasApFollowers}}
+    <h3 class="mt-1 mb-05">Followers ({{apFollowersCount}})</h3>
+    <ul class="list-plain">
+      {{#apFollowers}}
+      <li class="list-row"><span class="mono flex-1 text-sm truncate">{{uri}}</span></li>
+      {{/apFollowers}}
+    </ul>
+    {{/hasApFollowers}}
+  </details>
+
+  <details class="card">
     <summary><h2>Add/Edit Custom Triples</h2></summary>
     <p class="text-muted mb-075">Add custom predicate-object pairs for your WebID subject. Use the template key in your profile page template, e.g. <code>{{=<% %>=}}{{#foaf_knows}}...{{/foaf_knows}}<%={{ }}=%></code>.</p>
 
@@ -157,5 +191,24 @@
 </details>
 {{/hasSystemTriples}}
 
+<script>
+(function() {
+  var editor = document.getElementById('foaf-knows-editor');
+  var addBtn = document.getElementById('fk-add');
+  if (!editor || !addBtn) return;
+  addBtn.addEventListener('click', function() {
+    var row = document.createElement('div');
+    row.className = 'fk-row flex gap-05 items-center mb-025';
+    row.innerHTML = '<input type="url" name="foaf_knows_uri[]" value="" placeholder="https://example.com/profile#me" class="flex-1 mono">'
+      + '<button type="button" class="btn btn-secondary btn-compact fk-remove">Remove</button>';
+    editor.appendChild(row);
+  });
+  editor.addEventListener('click', function(e) {
+    if (e.target.classList.contains('fk-remove')) {
+      e.target.closest('.fk-row').remove();
+    }
+  });
+})();
+</script>
 <script src="/scripts/triple-editor.js"></script>
 <script src="/scripts/page-builder.js"></script>

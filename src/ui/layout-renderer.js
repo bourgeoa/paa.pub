@@ -259,6 +259,15 @@ export const DEFAULT_LAYOUT = {
             { id: 'db12b', tag: 'span', content: '{{nick}}', rdfa: { property: 'foaf:nick' } },
           ]},
         ]},
+        // Connections card
+        { id: 'db15', tag: 'div', attrs: { class: 'card' }, conditional: 'has_connections', children: [
+          { id: 'db16', tag: 'h2', content: 'Connections' },
+          { id: 'db17', tag: 'ul', attrs: { class: 'list-plain' }, children: [
+            { id: 'db18', tag: 'li', repeat: 'connections_list', children: [
+              { id: 'db19', tag: 'a', attrs: { href: '{{value}}' }, rdfa: { rel: 'foaf:knows' }, content: '{{value}}' },
+            ]},
+          ]},
+        ]},
         // WebID link
         { id: 'db13', tag: 'div', attrs: { class: 'card' }, children: [
           { id: 'db14', tag: 'a', attrs: { href: '{{webId}}', class: 'mono text-muted text-sm' }, content: 'WebID' },

@@ -37,7 +37,7 @@ export async function renderDashboard(reqCtx) {
   const passkeys = credResults.filter(Boolean).map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt }));
 
   // Compute storage breakdown by resource type
-  const breakdown = await computeStorageBreakdown(reqCtx.storage, config);
+  const breakdown = await computeStorageBreakdown(reqCtx.storage, config, quota.usedBytes);
 
   return renderPage('Dashboard', template, {
     username,
@@ -138,7 +138,7 @@ async function collectResources(storage, containerIri, results) {
 /**
  * Compute storage breakdown grouped by resource category.
  */
-async function computeStorageBreakdown(storage, config) {
+async function computeStorageBreakdown(storage, config, totalUsedBytes) {
   const rootIri = `${config.baseUrl}/${config.username}/`;
   const resources = [];
 
@@ -168,6 +168,18 @@ async function computeStorageBreakdown(storage, config) {
       count: c.count,
       label: `${c.count} file${c.count !== 1 ? 's' : ''}`,
     }));
+
+  // Add "Everything Else" for unaccounted bytes (metadata, indexes, etc.)
+  const categorizedBytes = [...buckets.values()].reduce((sum, c) => sum + c.bytes, 0);
+  const remainder = (totalUsedBytes || 0) - categorizedBytes;
+  if (remainder > 0) {
+    categories.push({
+      name: 'Everything Else',
+      size: formatBytes(remainder),
+      count: 0,
+      label: 'system data',
+    });
+  }
 
   return { categories, totalCount: resources.length };
 }
