@@ -16,7 +16,7 @@ export async function renderActivityPage(reqCtx) {
   if (authCheck) return authCheck;
 
   const { config, env, url } = reqCtx;
-  const username = config.username;
+  const username = reqCtx.user;
   const error = url.searchParams.get('error');
   const feedLimit = config.feedLimit;
 
@@ -121,7 +121,7 @@ export async function renderActivityPage(reqCtx) {
     hasActivities: activities.length > 0,
     feedLimit,
     showAll,
-  }, { user: username, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl });
+  }, { user: username, config, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl });
 }
 
 /**
@@ -133,6 +133,7 @@ export async function renderRemoteFeed(reqCtx) {
   if (authCheck) return authCheck;
 
   const { config, env, url } = reqCtx;
+  const username = reqCtx.user;
   const actorUri = url.searchParams.get('actor');
   if (!actorUri) {
     return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
@@ -143,7 +144,7 @@ export async function renderRemoteFeed(reqCtx) {
   // Fetch the remote actor to get their outbox URL
   const actor = await fetchRemoteActor(actorUri, env.APPDATA);
   if (!actor || !actor.outbox) {
-    return renderPage('Remote Feed', '<h1>Remote Feed</h1><div class="card"><div class="text-muted">Could not load actor or outbox.</div><a href="/activity" class="btn mt-05">Back</a></div>', {}, { user: config.username, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl });
+    return renderPage('Remote Feed', '<h1>Remote Feed</h1><div class="card"><div class="text-muted">Could not load actor or outbox.</div><a href="/activity" class="btn mt-05">Back</a></div>', {}, { user: username, config, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl });
   }
 
   // Fetch the outbox collection
@@ -208,7 +209,7 @@ ${activities.map(a => `<div class="card">
   <div>${a.content}</div>` : `<div class="text-muted">${escapeHtml(a.type)} activity</div>`}
 </div>`).join('\n')}`;
 
-  return renderPage('Remote Feed', body, {}, { user: config.username, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl });
+  return renderPage('Remote Feed', body, {}, { user: username, config, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl });
 }
 
 function escapeHtml(str) {
@@ -223,8 +224,8 @@ export async function handleMarkRead(reqCtx) {
   const authCheck = requireAuth(reqCtx);
   if (authCheck) return authCheck;
 
-  const { config, env, request } = reqCtx;
-  const username = config.username;
+  const { env, request } = reqCtx;
+  const username = reqCtx.user;
   const formData = await request.formData();
   const id = formData.get('id');
 
@@ -244,8 +245,8 @@ export async function handleMarkAllRead(reqCtx) {
   const authCheck = requireAuth(reqCtx);
   if (authCheck) return authCheck;
 
-  const { config, env } = reqCtx;
-  const username = config.username;
+  const { env } = reqCtx;
+  const username = reqCtx.user;
 
   await Promise.all([
     env.APPDATA.put(`ap_read_watermark:${username}`, new Date().toISOString()),

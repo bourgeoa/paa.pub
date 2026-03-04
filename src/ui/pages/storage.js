@@ -62,7 +62,7 @@ export async function renderStoragePage(reqCtx) {
   if (authCheck) return authCheck;
 
   const { config, storage, env, url } = reqCtx;
-  const username = config.username;
+  const username = reqCtx.user;
   const path = url.pathname.replace(/^\/storage\/?/, '') || `${username}/`;
   const resourceIri = `${config.baseUrl}/${path}`;
   const isDir = path.endsWith('/');
@@ -90,7 +90,7 @@ async function renderContainerPage(reqCtx, path, resourceIri, username) {
     items,
     hasItems: items.length > 0,
     isRoot,
-  }, { user: username, nav: 'storage', storage, baseUrl: config.baseUrl });
+  }, { user: username, config, nav: 'storage', storage, baseUrl: config.baseUrl });
 }
 
 // ── Resource page ────────────────────────────────────
@@ -120,7 +120,7 @@ async function renderResourcePage(reqCtx, path, resourceIri, username, editMode,
   });
 
   // Editable metadata triples for the triple editor widget
-  const mergedPrefixes = await loadMergedPrefixes(reqCtx.env.APPDATA, config.username);
+  const mergedPrefixes = await loadMergedPrefixes(reqCtx.env.APPDATA, username);
   const metaTriplesEditable = metaTriples.map(t => {
     const predicateIri = unwrapIri(t.predicate);
     let objectValue = t.object;
@@ -168,7 +168,7 @@ async function renderResourcePage(reqCtx, path, resourceIri, username, editMode,
     metaTurtle,
     prefixesJson: JSON.stringify(mergedPrefixes),
     namespaceCatalogJson: JSON.stringify(await loadPredicateCatalog(reqCtx.env.APPDATA, mergedPrefixes)),
-  }, { user: username, nav: 'storage', storage, baseUrl: config.baseUrl });
+  }, { user: username, config, nav: 'storage', storage, baseUrl: config.baseUrl });
 }
 
 // ── POST /storage/** ─────────────────────────────────
@@ -178,7 +178,8 @@ export async function handleStorageAction(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, storage, env, url } = reqCtx;
-  const path = url.pathname.replace(/^\/storage\/?/, '') || `${config.username}/`;
+  const username = reqCtx.user;
+  const path = url.pathname.replace(/^\/storage\/?/, '') || `${username}/`;
   const resourceIri = `${config.baseUrl}/${path}`;
   const ct = request.headers.get('Content-Type') || '';
   let action, slug, name, content, metadata, destination;
@@ -187,7 +188,7 @@ export async function handleStorageAction(reqCtx) {
     const form = await request.formData();
     action = form.get('action');
     if (action === 'upload') {
-      return handleUpload(form, resourceIri, path, config, storage, env);
+      return handleUpload(form, resourceIri, path, config, storage, env, username);
     }
     name = form.get('name');
     content = form.get('content');
@@ -223,7 +224,7 @@ export async function handleStorageAction(reqCtx) {
     const textBytes = new TextEncoder().encode(text).byteLength;
 
     // Quota check
-    const quotaResult = await checkQuota(env.APPDATA, config.username, textBytes, config.storageLimit);
+    const quotaResult = await checkQuota(env.APPDATA, username, textBytes, config.storageLimit);
     if (!quotaResult.allowed) return quotaExceededResponse(quotaResult.usedBytes, quotaResult.limitBytes);
     const cqResult = await checkContainerQuota(env.APPDATA, resourceIri, textBytes);
     if (!cqResult.allowed) return containerQuotaExceededResponse(cqResult.blockedBy, cqResult.usedBytes, cqResult.limitBytes);
@@ -243,7 +244,7 @@ export async function handleStorageAction(reqCtx) {
     await appendContainment(storage, resourceIri, newIri);
 
     // Update quota tracking
-    await addQuota(env.APPDATA, config.username, textBytes);
+    await addQuota(env.APPDATA, username, textBytes);
     await addContainerBytes(env.APPDATA, resourceIri, textBytes);
 
     return redirect(`/storage/${path}${cleanName}`);
@@ -281,16 +282,16 @@ export async function handleStorageAction(reqCtx) {
     }
     const parent = computeParent(resourceIri);
     if (parent) await removeContainment(storage, parent, resourceIri);
-    const parentPath = parent ? parent.replace(config.baseUrl + '/', '') : `${config.username}/`;
+    const parentPath = parent ? parent.replace(config.baseUrl + '/', '') : `${username}/`;
     return redirect(`/storage/${parentPath}`);
   }
 
   if (action === 'move' && destination) {
-    return handleMove(resourceIri, destination, path, config, storage, env);
+    return handleMove(resourceIri, destination, path, config, storage, env, username);
   }
 
   if (action === 'copy' && destination) {
-    return handleCopy(resourceIri, destination, path, config, storage, env);
+    return handleCopy(resourceIri, destination, path, config, storage, env, username);
   }
 
   return redirect(`/storage/${path}`);
@@ -298,7 +299,7 @@ export async function handleStorageAction(reqCtx) {
 
 // ── Upload with metadata capture ─────────────────────
 
-async function handleUpload(form, containerIri, path, config, storage, env) {
+async function handleUpload(form, containerIri, path, config, storage, env, username) {
   const file = form.get('file');
   const slug = form.get('slug') || file.name;
   const cleanSlug = slug.replace(/[^a-zA-Z0-9._-]/g, '-');
@@ -307,7 +308,7 @@ async function handleUpload(form, containerIri, path, config, storage, env) {
   const fileType = file.type || 'application/octet-stream';
 
   // Quota checks before writing
-  const quotaResult = await checkQuota(env.APPDATA, config.username, binary.byteLength, config.storageLimit);
+  const quotaResult = await checkQuota(env.APPDATA, username, binary.byteLength, config.storageLimit);
   if (!quotaResult.allowed) return quotaExceededResponse(quotaResult.usedBytes, quotaResult.limitBytes);
   const cqResult = await checkContainerQuota(env.APPDATA, containerIri, binary.byteLength);
   if (!cqResult.allowed) return containerQuotaExceededResponse(cqResult.blockedBy, cqResult.usedBytes, cqResult.limitBytes);
@@ -333,7 +334,7 @@ async function handleUpload(form, containerIri, path, config, storage, env) {
   await appendContainment(storage, containerIri, newIri);
 
   // Update quota tracking
-  await addQuota(env.APPDATA, config.username, binary.byteLength);
+  await addQuota(env.APPDATA, username, binary.byteLength);
   await addContainerBytes(env.APPDATA, containerIri, binary.byteLength);
 
   return redirect(`/storage/${path}`);
@@ -538,13 +539,13 @@ function computeCopyDefault(storagePath) {
   return storagePath + '-copy';
 }
 
-function validateDestination(destination, config, sourceIri) {
+function validateDestination(destination, config, sourceIri, username) {
   if (!destination || !destination.trim()) return { error: 'Destination path is required.' };
   let dest = destination.trim();
   // Strip leading slash
   if (dest.startsWith('/')) dest = dest.slice(1);
   // Must start with username/
-  if (!dest.startsWith(config.username + '/')) return { error: 'Destination must be within your pod.' };
+  if (!dest.startsWith(username + '/')) return { error: 'Destination must be within your pod.' };
   const destIri = `${config.baseUrl}/${dest}`;
   // Cannot move/copy to self
   if (destIri === sourceIri) return { error: 'Destination is the same as source.' };
@@ -822,8 +823,8 @@ async function copyContainerRecursive(storage, sourceIri, destIri) {
   }
 }
 
-async function handleMove(resourceIri, destination, path, config, storage, env) {
-  const v = validateDestination(destination, config, resourceIri);
+async function handleMove(resourceIri, destination, path, config, storage, env, username) {
+  const v = validateDestination(destination, config, resourceIri, username);
   if (v.error) return errorResponse(v.error, 400);
 
   const isDir = path.endsWith('/');
@@ -865,8 +866,8 @@ async function handleMove(resourceIri, destination, path, config, storage, env) 
   return redirect(`/storage/${v.destPath}`);
 }
 
-async function handleCopy(resourceIri, destination, path, config, storage, env) {
-  const v = validateDestination(destination, config, resourceIri);
+async function handleCopy(resourceIri, destination, path, config, storage, env, username) {
+  const v = validateDestination(destination, config, resourceIri, username);
   if (v.error) return errorResponse(v.error, 400);
 
   const isDir = path.endsWith('/');
@@ -881,7 +882,7 @@ async function handleCopy(resourceIri, destination, path, config, storage, env) 
     : await computeResourceSize(storage, resourceIri);
 
   // Quota checks
-  const quotaResult = await checkQuota(env.APPDATA, config.username, size, config.storageLimit);
+  const quotaResult = await checkQuota(env.APPDATA, username, size, config.storageLimit);
   if (!quotaResult.allowed) return quotaExceededResponse(quotaResult.usedBytes, quotaResult.limitBytes);
   const newParent = computeParent(v.destIri);
   if (newParent) {
@@ -903,7 +904,7 @@ async function handleCopy(resourceIri, destination, path, config, storage, env) 
   if (newParent) await appendContainment(storage, newParent, v.destIri);
 
   // Update quotas
-  await addQuota(env.APPDATA, config.username, size);
+  await addQuota(env.APPDATA, username, size);
   if (newParent) await addContainerBytes(env.APPDATA, newParent, size);
 
   return redirect(`/storage/${v.destPath}`);

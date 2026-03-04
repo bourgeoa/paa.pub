@@ -23,6 +23,7 @@ import { renderPage } from '../shell.js';
 import template from '../templates/acl-editor.html';
 import { requireAuth } from '../../auth/middleware.js';
 import { getContainerQuota, setContainerQuotaLimit } from '../../storage/container-quota.js';
+import { getUserConfig } from '../../config.js';
 
 /**
  * Handle GET /acp/**
@@ -32,7 +33,8 @@ export async function renderAclEditor(reqCtx) {
   if (authCheck) return authCheck;
 
   const { config, env, url } = reqCtx;
-  const username = config.username;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
   const path = url.pathname.replace(/^\/acp\/?/, '') || `${username}/`;
   const resourceIri = `${config.baseUrl}/${path}`;
   const isDir = path.endsWith('/');
@@ -109,10 +111,10 @@ export async function renderAclEditor(reqCtx) {
     effectiveSource,
     friends,
     hasFriends: friends.length > 0,
-    turtlePolicy: policyToTurtle(policy, resourceIri, config.webId, friends),
+    turtlePolicy: policyToTurtle(policy, resourceIri, uc.webId, friends),
     quotaData,
     quotaLimitValue,
-  }, { user: username, nav: 'storage', storage: reqCtx.storage, baseUrl: config.baseUrl });
+  }, { user: username, config, nav: 'storage', storage: reqCtx.storage, baseUrl: config.baseUrl });
 }
 
 /**
@@ -123,7 +125,7 @@ export async function handleAclUpdate(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, env, url } = reqCtx;
-  const username = config.username;
+  const username = reqCtx.user;
   const path = url.pathname.replace(/^\/acp\/?/, '') || `${username}/`;
   const resourceIri = `${config.baseUrl}/${path}`;
 

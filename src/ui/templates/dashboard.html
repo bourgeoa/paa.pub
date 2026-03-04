@@ -10,14 +10,15 @@
   </table>
 </div>
 
-<!-- <div class="card">
+<div class="card">
   <h2>Quick Links</h2>
   <div class="flex gap-05 flex-wrap">
-    <a href="/activity" class="btn">Activity Feed</a>
-    <a href="/storage/" class="btn btn-secondary">File Storage</a>
+    <a href="/app-permissions" class="btn btn-secondary">App Permissions</a>
+    <a href="/profile" class="btn btn-secondary">Edit Profile</a>
+    <a href="/{{username}}/" class="btn btn-secondary">Public Profile</a>
     <a href="/.well-known/webfinger?resource=acct:{{{webfingerParam}}}" class="btn btn-secondary">WebFinger</a>
   </div>
-</div> -->
+</div>
 
 <div class="stats-grid">
   <div class="card">
@@ -104,3 +105,8 @@
   <script src="/scripts/webauthn-utils.js"></script>
   <script src="/scripts/passkey-register.js"></script>
 </div>
+<script>
+  if (window.IdentityProvider && IdentityProvider.register) {
+    IdentityProvider.register('{{fedcmConfigURL}}').catch(function() {});
+  }
+</script>

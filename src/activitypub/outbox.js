@@ -2,10 +2,12 @@
  * Outbox collection and C2S activity creation.
  */
 import { requireAuth } from '../auth/middleware.js';
-import { buildCreateNote, buildFollow, buildUnfollow, storeOutboxActivity, acceptFollowRequest, rejectFollowRequest } from './activities.js';
+import { buildCreateNote, buildFollow, buildUnfollow, storeOutboxActivity, storeInboxActivity, acceptFollowRequest, rejectFollowRequest } from './activities.js';
 import { deliverActivity, collectInboxes } from './delivery.js';
 import { resolveHandle, fetchRemoteActor, getActorInbox } from './remote.js';
 import { simpleHash } from '../utils.js';
+import { userExists } from '../users.js';
+import { getUserConfig } from '../config.js';
 
 const PAGE_SIZE = 20;
 
@@ -16,7 +18,7 @@ export async function handleOutbox(reqCtx) {
   const { url, params, config, env } = reqCtx;
   const username = params.user;
 
-  if (username !== config.username) {
+  if (!await userExists(env.APPDATA, username)) {
     return new Response('Not Found', { status: 404 });
   }
 
@@ -71,6 +73,25 @@ export async function handleOutbox(reqCtx) {
 }
 
 /**
+ * Detect if a follow/unfollow target refers to a local user.
+ * Returns the local username or null.
+ */
+function resolveLocalUser(target, config) {
+  // bare username or @username (no domain part)
+  const bare = target.match(/^@?([a-zA-Z0-9_-]+)$/);
+  if (bare) return bare[1];
+  // @username@domain where domain is ours
+  const full = target.match(/^@?([^@]+)@(.+)$/);
+  if (full && full[2] === config.domain) return full[1];
+  // Full actor URI on this server
+  if (target.startsWith(config.baseUrl + '/')) {
+    const parts = target.slice(config.baseUrl.length + 1).split('/');
+    if (parts[1] === 'profile' && parts[2]?.startsWith('card')) return parts[0];
+  }
+  return null;
+}
+
+/**
  * Handle POST /compose — Create a Note
  */
 export async function handleCompose(reqCtx) {
@@ -78,6 +99,10 @@ export async function handleCompose(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, env, ctx } = reqCtx;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
+  const userScopedConfig = { ...config, ...uc };
+
   const form = await request.formData();
   const content = form.get('content');
   if (!content) {
@@ -86,20 +111,20 @@ export async function handleCompose(reqCtx) {
   const summary = form.get('summary') || '';
   const audience = form.get('audience') || 'public';
 
-  const activity = buildCreateNote(config, content, summary, audience);
-  await storeOutboxActivity(activity, config.username, env);
+  const activity = buildCreateNote(userScopedConfig, content, summary, audience);
+  await storeOutboxActivity(activity, username, env);
 
   // Deliver to followers
   if (audience !== 'private') {
-    const followersData = await env.APPDATA.get(`ap_followers:${config.username}`);
+    const followersData = await env.APPDATA.get(`ap_followers:${username}`);
     const followers = JSON.parse(followersData || '[]');
     if (followers.length > 0) {
-      const privatePem = await env.APPDATA.get(`ap_private_key:${config.username}`);
+      const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
       const inboxUrls = await collectInboxes(followers, env.APPDATA);
       deliverActivity({
         activityJson: JSON.stringify(activity),
         inboxUrls,
-        keyId: config.keyId,
+        keyId: uc.keyId,
         privatePem,
         ctx,
       });
@@ -117,13 +142,23 @@ export async function handleFollow(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, env, ctx } = reqCtx;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
+  const userScopedConfig = { ...config, ...uc };
+
   const form = await request.formData();
   const target = form.get('target');
   if (!target) {
     return new Response(null, { status: 302, headers: { 'Location': '/activity?error=no_target' } });
   }
 
-  // Resolve handle if needed
+  // Check if this is a local user
+  const localTarget = resolveLocalUser(target, config);
+  if (localTarget && await userExists(env.APPDATA, localTarget)) {
+    return handleLocalFollow(username, localTarget, config, env, uc);
+  }
+
+  // Remote follow
   let actorUri = target;
   if (target.includes('@') && !target.startsWith('http')) {
     actorUri = await resolveHandle(target);
@@ -132,23 +167,59 @@ export async function handleFollow(reqCtx) {
     }
   }
 
-  const activity = buildFollow(config, actorUri);
-  await storeOutboxActivity(activity, config.username, env);
+  const activity = buildFollow(userScopedConfig, actorUri);
+  await storeOutboxActivity(activity, username, env);
 
   // Deliver Follow to target
   const remoteActor = await fetchRemoteActor(actorUri, env.APPDATA);
   if (remoteActor) {
     const inboxUrl = getActorInbox(remoteActor);
     if (inboxUrl) {
-      const privatePem = await env.APPDATA.get(`ap_private_key:${config.username}`);
+      const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
       deliverActivity({
         activityJson: JSON.stringify(activity),
         inboxUrls: [inboxUrl],
-        keyId: config.keyId,
+        keyId: uc.keyId,
         privatePem,
         ctx,
       });
     }
+  }
+
+  return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
+}
+
+/**
+ * Handle a local follow — both users are on this server.
+ */
+async function handleLocalFollow(followerUsername, targetUsername, config, env, followerUc) {
+  const targetUc = getUserConfig(config, targetUsername);
+
+  // Build a Follow activity
+  const activity = {
+    '@context': 'https://www.w3.org/ns/activitystreams',
+    type: 'Follow',
+    id: `${config.baseUrl}/${followerUsername}/outbox/${Date.now()}`,
+    actor: followerUc.actorId,
+    object: targetUc.actorId,
+    published: new Date().toISOString(),
+  };
+
+  // Store in follower's outbox
+  await storeOutboxActivity(activity, followerUsername, env);
+
+  // Store in target's inbox
+  await storeInboxActivity(activity, targetUsername, env);
+
+  // Add to target's pending follows
+  const pendingData = await env.APPDATA.get(`ap_pending_follows:${targetUsername}`);
+  const pending = JSON.parse(pendingData || '[]');
+  if (!pending.some(p => p.actor === followerUc.actorId)) {
+    pending.push({
+      actor: followerUc.actorId,
+      receivedAt: new Date().toISOString(),
+    });
+    await env.APPDATA.put(`ap_pending_follows:${targetUsername}`, JSON.stringify(pending));
   }
 
   return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
@@ -162,39 +233,76 @@ export async function handleUnfollow(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, env, ctx } = reqCtx;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
+  const userScopedConfig = { ...config, ...uc };
+
   const form = await request.formData();
   const target = form.get('target');
   if (!target) {
     return new Response(null, { status: 302, headers: { 'Location': '/activity?error=no_target' } });
   }
 
+  // Check if this is a local user
+  const localTarget = resolveLocalUser(target, config);
+  if (localTarget && await userExists(env.APPDATA, localTarget)) {
+    return handleLocalUnfollow(username, localTarget, target, config, env, uc);
+  }
+
   // Remove from following
-  const followingData = await env.APPDATA.get(`ap_following:${config.username}`);
+  const followingData = await env.APPDATA.get(`ap_following:${username}`);
   const following = JSON.parse(followingData || '[]');
   const idx = following.indexOf(target);
   if (idx >= 0) {
     following.splice(idx, 1);
-    await env.APPDATA.put(`ap_following:${config.username}`, JSON.stringify(following));
+    await env.APPDATA.put(`ap_following:${username}`, JSON.stringify(following));
   }
 
-  const activity = buildUnfollow(config, target);
-  await storeOutboxActivity(activity, config.username, env);
+  const activity = buildUnfollow(userScopedConfig, target);
+  await storeOutboxActivity(activity, username, env);
 
   // Deliver Undo(Follow) to target
   const remoteActor = await fetchRemoteActor(target, env.APPDATA);
   if (remoteActor) {
     const inboxUrl = getActorInbox(remoteActor);
     if (inboxUrl) {
-      const privatePem = await env.APPDATA.get(`ap_private_key:${config.username}`);
+      const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
       deliverActivity({
         activityJson: JSON.stringify(activity),
         inboxUrls: [inboxUrl],
-        keyId: config.keyId,
+        keyId: uc.keyId,
         privatePem,
         ctx,
       });
     }
   }
+
+  return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
+}
+
+/**
+ * Handle a local unfollow — both users are on this server.
+ */
+async function handleLocalUnfollow(followerUsername, targetUsername, targetActorUri, config, env, followerUc) {
+  const targetUc = getUserConfig(config, targetUsername);
+  const actorUri = targetActorUri.startsWith('http') ? targetActorUri : targetUc.actorId;
+
+  // Remove from follower's following list
+  const followingData = await env.APPDATA.get(`ap_following:${followerUsername}`);
+  const following = JSON.parse(followingData || '[]');
+  const filtered = following.filter(f => f !== actorUri);
+  await env.APPDATA.put(`ap_following:${followerUsername}`, JSON.stringify(filtered));
+
+  // Remove from target's followers list
+  const followersData = await env.APPDATA.get(`ap_followers:${targetUsername}`);
+  const followers = JSON.parse(followersData || '[]');
+  const filteredFollowers = followers.filter(f => f !== followerUc.actorId);
+  await env.APPDATA.put(`ap_followers:${targetUsername}`, JSON.stringify(filteredFollowers));
+
+  // Build and store Undo activity
+  const activity = buildUnfollow({ ...config, ...followerUc }, actorUri);
+  await storeOutboxActivity(activity, followerUsername, env);
+  await storeInboxActivity(activity, targetUsername, env);
 
   return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
 }
@@ -207,27 +315,47 @@ export async function handleAcceptFollowRequest(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, env, ctx } = reqCtx;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
+  const userScopedConfig = { ...config, ...uc };
+
   const form = await request.formData();
   const target = form.get('target');
   if (!target) {
     return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
   }
 
-  const accept = await acceptFollowRequest(target, config, env);
+  const accept = await acceptFollowRequest(target, userScopedConfig, env);
 
-  // Deliver Accept to the follower
-  const remoteActor = await fetchRemoteActor(target, env.APPDATA);
-  if (remoteActor) {
-    const inboxUrl = getActorInbox(remoteActor);
-    if (inboxUrl) {
-      const privatePem = await env.APPDATA.get(`ap_private_key:${config.username}`);
-      deliverActivity({
-        activityJson: JSON.stringify(accept),
-        inboxUrls: [inboxUrl],
-        keyId: config.keyId,
-        privatePem,
-        ctx,
-      });
+  // Check if the follower is a local user
+  const localFollower = resolveLocalUser(target, config);
+  if (localFollower && await userExists(env.APPDATA, localFollower)) {
+    // Local accept: directly update the follower's following list
+    const followerUc = getUserConfig(config, localFollower);
+    const followingData = await env.APPDATA.get(`ap_following:${localFollower}`);
+    const following = JSON.parse(followingData || '[]');
+    if (!following.includes(uc.actorId)) {
+      following.push(uc.actorId);
+      await env.APPDATA.put(`ap_following:${localFollower}`, JSON.stringify(following));
+    }
+    // Store Accept activity in both users' data
+    await storeOutboxActivity(accept, username, env);
+    await storeInboxActivity(accept, localFollower, env);
+  } else {
+    // Deliver Accept to the remote follower
+    const remoteActor = await fetchRemoteActor(target, env.APPDATA);
+    if (remoteActor) {
+      const inboxUrl = getActorInbox(remoteActor);
+      if (inboxUrl) {
+        const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
+        deliverActivity({
+          activityJson: JSON.stringify(accept),
+          inboxUrls: [inboxUrl],
+          keyId: uc.keyId,
+          privatePem,
+          ctx,
+        });
+      }
     }
   }
 
@@ -242,27 +370,39 @@ export async function handleRejectFollowRequest(reqCtx) {
   if (authCheck) return authCheck;
 
   const { request, config, env, ctx } = reqCtx;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
+  const userScopedConfig = { ...config, ...uc };
+
   const form = await request.formData();
   const target = form.get('target');
   if (!target) {
     return new Response(null, { status: 302, headers: { 'Location': '/activity' } });
   }
 
-  const reject = await rejectFollowRequest(target, config, env);
+  const reject = await rejectFollowRequest(target, userScopedConfig, env);
 
-  // Deliver Reject to the follower
-  const remoteActor = await fetchRemoteActor(target, env.APPDATA);
-  if (remoteActor) {
-    const inboxUrl = getActorInbox(remoteActor);
-    if (inboxUrl) {
-      const privatePem = await env.APPDATA.get(`ap_private_key:${config.username}`);
-      deliverActivity({
-        activityJson: JSON.stringify(reject),
-        inboxUrls: [inboxUrl],
-        keyId: config.keyId,
-        privatePem,
-        ctx,
-      });
+  // Check if the follower is a local user
+  const localFollower = resolveLocalUser(target, config);
+  if (localFollower && await userExists(env.APPDATA, localFollower)) {
+    // Store Reject in both users' data
+    await storeOutboxActivity(reject, username, env);
+    await storeInboxActivity(reject, localFollower, env);
+  } else {
+    // Deliver Reject to the remote follower
+    const remoteActor = await fetchRemoteActor(target, env.APPDATA);
+    if (remoteActor) {
+      const inboxUrl = getActorInbox(remoteActor);
+      if (inboxUrl) {
+        const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
+        deliverActivity({
+          activityJson: JSON.stringify(reject),
+          inboxUrls: [inboxUrl],
+          keyId: uc.keyId,
+          privatePem,
+          ctx,
+        });
+      }
     }
   }
 
@@ -274,4 +414,3 @@ function jsonResponse(data) {
     headers: { 'Content-Type': 'application/activity+json' },
   });
 }
-

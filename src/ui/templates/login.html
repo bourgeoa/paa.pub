@@ -6,14 +6,22 @@
   <form method="POST" action="/login">
     {{#returnTo}}<input type="hidden" name="return_to" value="{{returnTo}}">{{/returnTo}}
     <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="form-group">
       <label for="password">Password</label>
-      <input type="password" id="password" name="password" autocomplete="current-password" required autofocus>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
     </div>
     <button type="submit" class="btn">Sign In</button>
   </form>
   <div id="passkey-login" class="mt-1">
     <button type="button" class="btn btn-secondary hidden" onclick="passkeyLogin()" id="passkey-btn">Sign in with Passkey</button>
   </div>
+  <div id="fedcm-login" class="mt-1">
+    <button type="button" class="btn btn-secondary hidden" onclick="fedcmLogin()" id="fedcm-btn">Sign in with FedCM</button>
+  </div>
   <script src="/scripts/webauthn-utils.js"></script>
   <script src="/scripts/passkey-login.js"></script>
+  <script src="/scripts/fedcm-login.js"></script>
 </div>

@@ -28,16 +28,24 @@ import Mustache from 'mustache';
 import layoutTemplate from './templates/layout.html';
 import navPartial from './templates/partials/nav.html';
 
-function renderNav(user, active) {
+function renderNav(user, active, opts = {}) {
+  const items = [
+    { href: '/dashboard', label: 'Dashboard', id: 'dashboard' },
+    { href: '/profile', label: 'Profile', id: 'profile' },
+    { href: '/activity', label: 'Activity', id: 'activity' },
+    { href: '/storage/', label: 'Storage', id: 'storage' },
+    { href: '/app-permissions', label: 'Apps', id: 'app-permissions' },
+  ];
+
+  // Add admin nav item if the user is the admin
+  if (opts.config && user === opts.config.adminUsername) {
+    items.push({ href: '/admin', label: 'Admin', id: 'admin' });
+  }
+
   return Mustache.render(navPartial, {
     user,
     username: user,
-    items: [
-      { href: '/dashboard', label: 'Dashboard', id: 'dashboard' },
-      { href: '/profile', label: 'Profile', id: 'profile' },
-      { href: '/activity', label: 'Activity', id: 'activity' },
-      { href: '/storage/', label: 'Storage', id: 'storage' },
-    ].map(i => ({ ...i, activeClass: active === i.id ? 'active' : '' })),
+    items: items.map(i => ({ ...i, activeClass: active === i.id ? 'active' : '' })),
   });
 }
 
@@ -54,7 +62,7 @@ function renderNav(user, active) {
  * @returns {Promise<Response>}
  */
 export async function renderPage(title, bodyTemplate, data, opts = {}) {
-  const nav = opts.user ? renderNav(opts.user, opts.nav) : '';
+  const nav = opts.user ? renderNav(opts.user, opts.nav, opts) : '';
   const body = Mustache.render(bodyTemplate, data);
   const customThemeHref = await resolveCustomTheme(opts);
   const html = Mustache.render(layoutTemplate, { title, nav, body, customThemeHref });
@@ -80,7 +88,7 @@ export function renderPartial(template, data) {
  * @returns {Promise<string>|string}
  */
 export async function htmlPage(title, body, opts = {}) {
-  const nav = opts.user ? renderNav(opts.user, opts.nav) : '';
+  const nav = opts.user ? renderNav(opts.user, opts.nav, opts) : '';
   const customThemeHref = await resolveCustomTheme(opts);
   return Mustache.render(layoutTemplate, { title, nav, body, customThemeHref });
 }

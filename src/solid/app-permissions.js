@@ -43,13 +43,15 @@ export async function checkAppPermission(kv, username, clientId, resourceIri) {
  * @param {string} username
  * @param {string} clientId
  * @param {string} clientName
+ * @param {string} clientUri - Homepage URL of the app (optional)
  * @param {string[]} allowedContainers - Container IRIs
  */
-export async function grantAppPermission(kv, username, clientId, clientName, allowedContainers) {
+export async function grantAppPermission(kv, username, clientId, clientName, clientUri, allowedContainers) {
   const hash = simpleHash(clientId);
   const perm = {
     clientId,
     clientName: clientName || '',
+    clientUri: clientUri || '',
     allowedContainers,
     grantedAt: new Date().toISOString(),
   };
@@ -60,9 +62,9 @@ export async function grantAppPermission(kv, username, clientId, clientName, all
   const index = indexData ? JSON.parse(indexData) : [];
   const existing = index.findIndex(e => e.hash === hash);
   if (existing >= 0) {
-    index[existing] = { clientId, clientName: clientName || '', hash };
+    index[existing] = { clientId, clientName: clientName || '', clientUri: clientUri || '', hash };
   } else {
-    index.push({ clientId, clientName: clientName || '', hash });
+    index.push({ clientId, clientName: clientName || '', clientUri: clientUri || '', hash });
   }
   await kv.put(`app_perms_index:${username}`, JSON.stringify(index));
 }

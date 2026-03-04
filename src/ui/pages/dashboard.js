@@ -6,13 +6,15 @@ import template from '../templates/dashboard.html';
 import { requireAuth } from '../../auth/middleware.js';
 import { parseNTriples, unwrapIri, unwrapLiteral } from '../../rdf/ntriples.js';
 import { PREFIXES } from '../../rdf/prefixes.js';
+import { getUserConfig } from '../../config.js';
 
 export async function renderDashboard(reqCtx) {
   const authCheck = requireAuth(reqCtx);
   if (authCheck) return authCheck;
 
   const { config, env } = reqCtx;
-  const username = config.username;
+  const username = reqCtx.user;
+  const uc = getUserConfig(config, username);
 
   // Load stats
   const [followersData, followingData, outboxData, quotaData, pendingData] = await Promise.all([
@@ -37,12 +39,12 @@ export async function renderDashboard(reqCtx) {
   const passkeys = credResults.filter(Boolean).map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt }));
 
   // Compute storage breakdown by resource type
-  const breakdown = await computeStorageBreakdown(reqCtx.storage, config, quota.usedBytes);
+  const breakdown = await computeStorageBreakdown(reqCtx.storage, config, username, quota.usedBytes);
 
   return renderPage('Dashboard', template, {
     username,
-    webId: config.webId,
-    actorId: config.actorId,
+    webId: uc.webId,
+    actorId: uc.actorId,
     domain: config.domain,
     baseUrl: config.baseUrl,
     followerCount: followers.length,
@@ -58,7 +60,8 @@ export async function renderDashboard(reqCtx) {
     hasBreakdown: breakdown.categories.length > 0,
     totalResources: breakdown.totalCount,
     totalResourcesPlural: breakdown.totalCount !== 1,
-  }, { user: username, nav: 'dashboard', storage: reqCtx.storage, baseUrl: config.baseUrl });
+    fedcmConfigURL: config.baseUrl + '/fedcm/config.json',
+  }, { user: username, config, nav: 'dashboard', storage: reqCtx.storage, baseUrl: config.baseUrl });
 }
 
 function formatBytes(bytes) {
@@ -138,8 +141,8 @@ async function collectResources(storage, containerIri, results) {
 /**
  * Compute storage breakdown grouped by resource category.
  */
-async function computeStorageBreakdown(storage, config, totalUsedBytes) {
-  const rootIri = `${config.baseUrl}/${config.username}/`;
+async function computeStorageBreakdown(storage, config, username, totalUsedBytes) {
+  const rootIri = `${config.baseUrl}/${username}/`;
   const resources = [];
 
   try {

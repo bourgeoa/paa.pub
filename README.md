@@ -1,15 +1,17 @@
 # Kaiāulu Pa'a
 
-Single-user [Solid](https://solidproject.org/) + [ActivityPub](https://www.w3.org/TR/activitypub/) server that runs entirely on Cloudflare Workers.
+Multi-user [Solid](https://solidproject.org/) + [ActivityPub](https://www.w3.org/TR/activitypub/) server that runs entirely on Cloudflare Workers.
 
 Own your identity and data. Your server provides:
 
-- A **Solid Pod** — store and manage RDF and binary resources with full LDP protocol support
-- **ActivityPub federation** — follow and be followed by accounts on Mastodon, Pixelfed, and other fediverse servers
-- A **WebID profile** — a standards-based decentralized identity
-- **OIDC provider** — authenticate with Solid apps using your own server as the identity provider
-- A **web UI** — dashboard, profile editor, activity feed, file browser, and access control editor
-- **Security hardening** — rate limiting, request size limits, storage quotas, SSRF protection, app write restrictions, and HTTP Signature verification
+- **Multi-user support** — open or closed registration, per-user pods, admin panel
+- A **Solid Pod** per user — store and manage RDF and binary resources with full LDP protocol support
+- **ActivityPub federation** — follow and be followed by accounts on Mastodon, Pixelfed, and other fediverse servers, plus local following between users on the same server
+- A **WebID profile** — a standards-based decentralized identity for each user
+- **OIDC provider** — authenticate with Solid apps using your server as the identity provider
+- **FedCM identity provider** — browser-native account picker for streamlined login on third-party sites and re-authentication on your own server
+- A **web UI** — dashboard, profile editor, activity feed, file browser, access control editor, and admin panel
+- **Security hardening** — rate limiting, request size limits, per-user storage quotas, SSRF protection, app write restrictions, and HTTP Signature verification
 
 Uses [s20e](https://github.com/chapeaux/s20e) as the RDF/SPARQL engine (Oxigraph compiled to WASM). Everything else — authentication, federation, LDP, UI — is vanilla JavaScript using only Web APIs.
 
@@ -83,7 +85,7 @@ compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-PAA_USERNAME = "alice"
+PAA_USERNAME = "alice"    # admin account username
 
 [[kv_namespaces]]
 binding = "TRIPLESTORE"
@@ -106,7 +108,7 @@ fallthrough = true
 ### 3. Set secrets
 
 ```sh
-wrangler secret put PAA_PASSWORD    # choose a strong login password
+wrangler secret put PAA_PASSWORD    # admin account password
 wrangler secret put PAA_DOMAIN      # your domain, e.g. solid.example.com
 ```
 
@@ -126,9 +128,9 @@ Without a custom domain, your server will be available at `<worker-name>.<subdom
 npm run deploy
 ```
 
-On the first request, the server automatically bootstraps: creates your user account, generates an RSA keypair for ActivityPub federation, initializes root containers, writes a WebID profile document, and sets default access policies.
+On the first request, the server automatically bootstraps: creates the admin account, generates RSA keypairs for ActivityPub federation and OIDC token signing, initializes root containers, writes a WebID profile document, and sets default access policies.
 
-Visit `https://your-domain.com/login` to sign in with your password.
+Visit `https://your-domain.com/login` to sign in with the admin username and password. Other users can register at `https://your-domain.com/signup` (if registration is open).
 
 ## Local development
 
@@ -150,19 +152,24 @@ The domain auto-detects as `localhost:8787` in development. Your WebID will be `
 
 | Variable | Where | Default | Description |
 |---|---|---|---|
-| `PAA_USERNAME` | `wrangler.toml` `[vars]` | `admin` | Your username (appears in URLs) |
-| `PAA_PASSWORD` | Secret | *(required)* | Login password |
+| `PAA_USERNAME` | `wrangler.toml` `[vars]` | `admin` | Admin account username (appears in URLs) |
+| `PAA_PASSWORD` | Secret | *(required)* | Admin account password |
 | `PAA_DOMAIN` | Secret or `[vars]` | auto-detected | Public domain (e.g. `solid.example.com`) |
-| `PAA_STORAGE_LIMIT` | `[vars]` or secret | `1GB` | Maximum storage usage (e.g. `500MB`, `2GB`) |
+| `PAA_STORAGE_LIMIT` | `[vars]` or secret | `1GB` | Default per-user storage limit (e.g. `500MB`, `2GB`) |
 | `PAA_FEED_LIMIT` | `[vars]` | `50` | Maximum activities shown in the feed |
+| `PAA_REGISTRATION` | `[vars]` | `open` | Registration mode: `open` (anyone can sign up) or `closed` (admin creates accounts) |
 
-**Choosing a username**: Your username appears in every URL on your server (`/alice/profile/card`, `/alice/public/`, etc.) and in your WebID. Pick something short. It cannot be changed after bootstrap without re-creating all data.
+**Choosing the admin username**: The admin username appears in URLs (`/alice/profile/card`, `/alice/public/`, etc.) and in the admin's WebID. Pick something short. It cannot be changed after bootstrap without re-creating all data. Additional users choose their own usernames during registration.
 
 ## What you get
 
+### Registration (`/signup`)
+
+New users can create an account when registration is open (`PAA_REGISTRATION=open`). Each new account gets its own Solid pod, WebID profile, ActivityPub actor, and RSA keypair. When registration is closed, only the admin can create accounts from the admin panel.
+
 ### Dashboard (`/dashboard`)
 
-Overview of your server: WebID, follower/following/post counts, pending follow request notifications, storage breakdown by resource type, and passkey management.
+Overview of your account: WebID, follower/following/post counts, pending follow request notifications, storage breakdown by resource type, and passkey management. On supported browsers, the dashboard silently registers your server as a FedCM identity provider via `IdentityProvider.register()`.
 
 ### Profile editor (`/profile`)
 
@@ -171,7 +178,7 @@ Edit your WebID profile fields (name, bio, avatar, homepage, etc.) and manage cu
 ### Activity feed (`/activity`)
 
 - **Compose** posts with audience selection (public, unlisted, followers-only, private)
-- **Follow** fediverse accounts by handle (`user@mastodon.social`) or actor URL
+- **Follow** fediverse accounts by handle (`user@mastodon.social`), actor URL, or local username
 - **Follow requests** — incoming follows require manual approval; accept or reject each request from the activity page
 - **Feed** shows inbox and outbox activities merged chronologically, limited to `PAA_FEED_LIMIT` entries
 - **Remote feeds** — click any follower or followed account to view their recent public posts
@@ -203,7 +210,14 @@ Container policies propagate to their contents unless overridden. You can disabl
 
 Manage which OIDC-authenticated Solid apps can write to your pod. When you authorize an app via the OIDC consent flow, you select which containers it may write to. The app permissions page lets you review, update, or revoke access for each app.
 
-Session-authenticated access (via the web UI) always has unrestricted write access.
+Session-authenticated access (via the web UI) always has unrestricted write access to the user's own pod.
+
+### Admin panel (`/admin`)
+
+Available to the admin user only. Provides:
+
+- **Dashboard** — aggregate stats: total users, total storage, total posts, and a per-user breakdown table
+- **User management** (`/admin/users`) — disable/enable accounts, set per-user storage quotas, and create new accounts (useful when registration is closed)
 
 ### Public profile page (`/{username}/`)
 
@@ -211,7 +225,7 @@ Your root container serves a dynamically rendered landing page built from your p
 
 ### Solid protocol
 
-Your pod is accessible at `/{username}/` via standard LDP methods:
+Each user's pod is accessible at `/{username}/` via standard LDP methods:
 
 ```sh
 # Read a resource
@@ -260,11 +274,11 @@ curl -H "Accept: application/activity+json" https://solid.example.com/alice/outb
 curl -H "Accept: application/activity+json" https://solid.example.com/alice/followers
 ```
 
-Remote servers can follow your account by sending a `Follow` activity to `/{username}/inbox`. Follow requests are held pending until you accept or reject them from the activity page.
+Remote servers can follow any account by sending a `Follow` activity to `/{username}/inbox`. Follow requests are held pending until the user accepts or rejects them from the activity page. Users on the same server can follow each other directly without federation overhead.
 
 ### OIDC provider
 
-Your server acts as an OpenID Connect provider. Solid apps can authenticate against it:
+The server acts as an OpenID Connect provider for all users. Solid apps can authenticate any user against it:
 
 ```
 Discovery:  https://solid.example.com/.well-known/openid-configuration
@@ -276,21 +290,41 @@ JWKS:       https://solid.example.com/jwks
 
 When authorizing an app, you choose which pod containers it may write to. Apps that were previously authorized without container selection will be re-prompted.
 
+### FedCM identity provider
+
+The server implements the [Federated Credential Management (FedCM)](https://developer.mozilla.org/en-US/docs/Web/API/FedCM_API) API, allowing browsers to present a native account picker for authentication. This works in two roles:
+
+**As an Identity Provider (IdP):** Third-party websites can use your server to authenticate users via the browser's built-in credential UI, without redirects or popups.
+
+```
+Discovery:        https://solid.example.com/.well-known/web-identity
+Config:           https://solid.example.com/fedcm/config.json
+Accounts:         https://solid.example.com/fedcm/accounts
+Assertion:        https://solid.example.com/fedcm/assertion
+Client metadata:  https://solid.example.com/fedcm/client-metadata
+Disconnect:       https://solid.example.com/fedcm/disconnect
+```
+
+**As a Relying Party (RP):** The login and landing pages include a "Sign in with FedCM" button (visible in Chrome 108+) that triggers the browser account picker for returning users, providing a streamlined re-authentication experience without typing credentials.
+
+The FedCM endpoints require the `Sec-Fetch-Dest: webidentity` header (enforced by the browser). The assertion endpoint issues short-lived JWTs (5 minutes) signed with the same RSA key used for OIDC tokens. Connected RPs are tracked per-user in KV and surfaced in the browser account picker via `approved_clients`.
+
 ## Security
 
 The server includes defense-in-depth hardening for public-facing deployment:
 
 | Layer | Protection |
 |---|---|
-| **Rate limiting** | KV-backed sliding window limits on login (10/15min), token (30/min), inbox (60/min), registration (10/hr), and LDP writes (60/min). Returns 429 with `Retry-After`. |
+| **Rate limiting** | KV-backed sliding window limits on login (10/15min), token (30/min), inbox (60/min), registration (10/hr), and LDP writes (60/min). FedCM assertion and verify endpoints share the token and login limits respectively. Returns 429 with `Retry-After`. |
 | **Request size limits** | Content-Length checked before body read: 1 MB for JSON, 5 MB for RDF, 100 MB for binary uploads. Returns 413. |
-| **Storage quotas** | Global limit via `PAA_STORAGE_LIMIT` (default 1 GB). Per-container quotas configurable in the ACP editor. Returns 507. |
+| **Storage quotas** | Default per-user limit via `PAA_STORAGE_LIMIT` (default 1 GB), overridable per-user by admin. Per-container quotas configurable in the ACP editor. Returns 507. |
 | **SSRF protection** | All outbound `fetch()` calls validate URLs — blocks private IPs, localhost, and non-HTTP(S) schemes. |
 | **HTTP Signature verification** | Incoming ActivityPub activities require a valid HTTP Signature. Actors without a public key are rejected (401). Date header must be within 5 minutes to prevent replay. |
 | **Inbox validation** | Activities missing an `id` field are rejected. Actor URIs are SSRF-validated before fetching. |
 | **Security headers** | HTML responses include `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`. |
 | **Error sanitization** | Internal errors return `Internal Server Error` with no stack traces or error messages exposed. |
 | **App write restrictions** | OIDC-authenticated apps can only write to containers the owner explicitly approved during the consent flow. Session-authenticated owner has unrestricted access. |
+| **FedCM headers** | Login/logout/registration responses include the `Set-Login` header so browsers can track IdP login state. FedCM account/assertion/disconnect endpoints require `Sec-Fetch-Dest: webidentity`. |
 
 The permissive CORS policy (reflected Origin + credentials) is required by the Solid protocol specification and is not restricted.
 
@@ -335,12 +369,17 @@ Cloudflare Worker (single fetch handler)
 
 | Key pattern | Value |
 |---|---|
+| `users_index` | JSON array of `{ username, createdAt, isAdmin, disabled }` |
+| `user_meta:{username}` | User metadata `{ createdAt, isAdmin, disabled, storageLimit? }` |
 | `user:{username}` | Password hash |
 | `session:{token}` | Session JSON (24h TTL) |
+| `system_initialized` | Bootstrap flag |
+| `oidc_private_key` | Server-wide OIDC signing key (RSA PEM) |
+| `oidc_public_key` | Server-wide OIDC verification key (RSA PEM) |
 | `acp:{resource_iri}` | Access control policy JSON |
 | `webauthn_cred:{user}:{id}` | Passkey credential |
-| `ap_private_key:{user}` | RSA private key (PEM) |
-| `ap_public_key:{user}` | RSA public key (PEM) |
+| `ap_private_key:{user}` | Per-user AP RSA private key (PEM) |
+| `ap_public_key:{user}` | Per-user AP RSA public key (PEM) |
 | `ap_followers:{user}` | JSON array of actor URIs |
 | `ap_following:{user}` | JSON array of actor URIs |
 | `ap_pending_follows:{user}` | JSON array of pending follow requests |
@@ -351,6 +390,7 @@ Cloudflare Worker (single fetch handler)
 | `ratelimit:{category}:{ip}` | Rate limit window `{ count, windowStart }` |
 | `app_perm:{user}:{hash}` | App write permission `{ clientId, allowedContainers[] }` |
 | `app_perms_index:{user}` | App permission index |
+| `fedcm_connected:{user}` | JSON array of connected FedCM RP client_id strings |
 
 **BLOBS R2**: Binary file data keyed by `blob:{resource_iri}`.
 
@@ -360,14 +400,21 @@ Cloudflare Worker (single fetch handler)
 src/
 ├── index.js              # Entry point, route dispatch, rate limiting, size limits
 ├── router.js             # URL pattern matching
-├── config.js             # Environment config (username, domain, storage/feed limits)
-├── bootstrap.js          # First-run initialization
+├── config.js             # Environment config (admin user, domain, storage/feed limits, registration mode)
+├── users.js              # User CRUD (list, create, disable, enable, quota)
+├── bootstrap.js          # First-run + per-user initialization
 ├── oidc.js               # OpenID Connect provider with app container consent
+├── fedcm.js              # FedCM identity provider + relying party endpoints
 ├── auth/
 │   ├── password.js       # PBKDF2 hashing
-│   ├── session.js        # KV-backed sessions
+│   ├── session.js        # KV-backed sessions (multi-user)
 │   ├── middleware.js      # Cookie extraction
-│   └── webauthn.js       # Passkey registration/login
+│   ├── webauthn.js       # Passkey registration/login
+│   └── registration.js   # User signup (open/closed registration)
+├── admin/
+│   ├── middleware.js      # Admin-only route guard
+│   ├── dashboard.js       # Admin stats dashboard
+│   └── users.js           # User management (disable, quota, create)
 ├── security/
 │   ├── rate-limit.js     # KV-backed sliding window rate limiter
 │   ├── size-limit.js     # Request Content-Length enforcement
@@ -385,7 +432,7 @@ src/
 │   ├── actor.js          # Actor JSON-LD document
 │   ├── webfinger.js      # WebFinger endpoint
 │   ├── inbox.js          # S2S inbox with HTTP Signature verification + SSRF protection
-│   ├── outbox.js         # Outbox + compose + follow accept/reject handlers
+│   ├── outbox.js         # Outbox + compose + follow/unfollow + local follow support
 │   ├── collections.js    # Followers/following collections
 │   ├── httpsig.js        # HTTP Signature sign/verify with date staleness check
 │   ├── delivery.js       # Activity fan-out with SSRF protection
@@ -426,25 +473,28 @@ src/
 - **Web Crypto API** for all cryptography — PBKDF2 password hashing, RSA HTTP Signatures, WebAuthn signature verification.
 - **No build tools** beyond Wrangler's built-in esbuild bundling. No frameworks, no transpilers.
 - **Server-rendered HTML** with Mustache templates. No client-side JavaScript framework.
-- **Single-user** design — one username, one pod, one ActivityPub actor. KV eventual consistency is acceptable since write contention is rare.
-- **Manual follow approval** — incoming Follow requests are stored as pending until the owner accepts or rejects them. Accept/Reject activities are delivered back to the requesting actor.
+- **Multi-user** — each user gets their own Solid pod, WebID profile, and ActivityPub actor. All KV keys are namespaced by username so no data migration is needed when adding users. Registration can be open (self-service) or closed (admin-only).
+- **Local following** — users on the same server can follow each other directly without WebFinger resolution or HTTP signature delivery, with the same pending-approval flow as remote follows.
+- **Manual follow approval** — incoming Follow requests (remote or local) are stored as pending until the user accepts or rejects them. Accept/Reject activities are delivered back to the requesting actor.
 - **App sandboxing** — OIDC-authenticated apps are restricted to writing only within containers the owner approved during the consent flow, preventing unauthorized writes.
 
 ## Troubleshooting
 
-**"PAA_PASSWORD environment variable must be set"** — You haven't set the password secret. Run `wrangler secret put PAA_PASSWORD`.
+**"PAA_PASSWORD environment variable must be set"** — You haven't set the admin password secret. Run `wrangler secret put PAA_PASSWORD`.
 
 **WebID or actor URLs show `localhost:8787`** — Set `PAA_DOMAIN` to your production domain: `wrangler secret put PAA_DOMAIN`.
 
-**Domain mismatch after changing domains** — The server re-bootstraps when it detects a domain change, updating all IRIs. If you see issues, you may need to clear KV data and let it re-bootstrap fresh.
+**Domain mismatch after changing domains** — The server re-bootstraps all users when it detects a domain change, updating all IRIs. If you see issues, you may need to clear KV data and let it re-bootstrap fresh.
 
 **Federation not working** — Your domain must be publicly accessible over HTTPS. Cloudflare Workers handle HTTPS automatically with custom domains. Check that WebFinger responds correctly: `curl https://yourdomain/.well-known/webfinger?resource=acct:youruser@yourdomain`.
 
 **429 Too Many Requests** — Rate limiting is active. Wait for the `Retry-After` period (shown in the response header) before retrying.
 
-**507 Insufficient Storage** — Storage quota exceeded. Either increase `PAA_STORAGE_LIMIT` or delete unused resources. For container quotas, adjust the limit in the ACP editor.
+**507 Insufficient Storage** — Storage quota exceeded. Either increase `PAA_STORAGE_LIMIT` (default limit), have the admin set a higher per-user quota at `/admin/users`, or delete unused resources. For container quotas, adjust the limit in the ACP editor.
 
 **403 on OIDC app writes** — The app doesn't have permission to write to the target container. Update its allowed containers at `/app-permissions` or re-authorize the app.
+
+**Registration page returns 403** — Registration is closed (`PAA_REGISTRATION=closed`). The admin can create accounts from the admin panel at `/admin/users`, or change to `PAA_REGISTRATION=open` to allow self-service signup.
 
 ## License
 

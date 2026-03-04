@@ -53,7 +53,7 @@ export async function checkRateLimit(kv, category, ip) {
 
   record.count++;
   const ttl = config.window - (now - record.windowStart);
-  await kv.put(key, JSON.stringify(record), { expirationTtl: Math.max(ttl, 1) });
+  await kv.put(key, JSON.stringify(record), { expirationTtl: Math.max(ttl, 60) });
   return { allowed: true, remaining: config.max - record.count, retryAfter: 0 };
 }
 

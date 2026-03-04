@@ -240,7 +240,7 @@ export function buildUnfollow(config, targetActorUri) {
 
 // --- Storage helpers ---
 
-async function storeInboxActivity(activity, username, env) {
+export async function storeInboxActivity(activity, username, env) {
   const id = activity.id || crypto.randomUUID();
   const hash = simpleHash(id);
   await env.APPDATA.put(`ap_inbox_item:${hash}`, JSON.stringify(activity));

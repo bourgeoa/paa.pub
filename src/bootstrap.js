@@ -8,6 +8,8 @@ import { hashPassword } from './auth/password.js';
 import { generateRSAKeyPair } from './crypto/rsa.js';
 import { iri, literal } from './rdf/ntriples.js';
 import { PREFIXES } from './rdf/prefixes.js';
+import { getUserConfig } from './config.js';
+import { createUser, listUsers } from './users.js';
 
 let bootstrapped = false;
 
@@ -20,58 +22,102 @@ let bootstrapped = false;
 export async function ensureBootstrapped(env, config, storage) {
   if (bootstrapped) return;
 
-  const flag = await env.APPDATA.get('user_initialized');
-  if (flag === 'true') {
+  const systemFlag = await env.APPDATA.get('system_initialized');
+  const legacyFlag = await env.APPDATA.get('user_initialized');
+
+  if (systemFlag === 'true') {
     // Check if domain changed since last bootstrap (or was never recorded)
     const storedDomain = await env.APPDATA.get('bootstrap_domain');
     if (storedDomain !== config.domain) {
-      console.log(`Bootstrap domain mismatch: stored=${storedDomain} current=${config.domain}, re-bootstrapping`);
-      await bootstrap(env, config, storage);
+      console.log(`Bootstrap domain mismatch: stored=${storedDomain} current=${config.domain}, re-bootstrapping all users`);
+      const users = await listUsers(env.APPDATA);
+      for (const user of users) {
+        await bootstrapUser(env, config, user.username, storage);
+      }
+      await env.APPDATA.put('bootstrap_domain', config.domain);
     }
     // Ensure ACP policies exist (migration for pre-ACP installs)
-    await ensureAcpPolicies(env, config);
-    // Ensure TypeIndex exists (migration for pre-TypeIndex installs)
-    await ensureTypeIndex(env, config, storage);
+    const users = await listUsers(env.APPDATA);
+    for (const user of users) {
+      await ensureAcpPolicies(env, config, user.username);
+      await ensureTypeIndex(env, config, user.username, storage);
+    }
     bootstrapped = true;
     return;
   }
 
-  if (!config.password) {
+  // Migration path: user_initialized exists but system_initialized does not
+  if (legacyFlag === 'true') {
+    console.log('Migrating from single-user to multi-user system');
+    const adminUsername = config.adminUsername;
+
+    // Create users_index from existing admin user
+    const existingMeta = await env.APPDATA.get(`user_meta:${adminUsername}`);
+    if (!existingMeta) {
+      await env.APPDATA.put(`user_meta:${adminUsername}`, JSON.stringify({
+        createdAt: new Date().toISOString(),
+        isAdmin: true,
+        disabled: false,
+      }));
+    }
+    const existingIndex = await env.APPDATA.get('users_index');
+    if (!existingIndex) {
+      await env.APPDATA.put('users_index', JSON.stringify([{
+        username: adminUsername,
+        createdAt: new Date().toISOString(),
+        isAdmin: true,
+        disabled: false,
+      }]));
+    }
+
+    // Generate server-wide OIDC keys if not present
+    await ensureOidcKeys(env);
+
+    // Ensure ACP and TypeIndex for admin
+    await ensureAcpPolicies(env, config, adminUsername);
+    await ensureTypeIndex(env, config, adminUsername, storage);
+
+    await env.APPDATA.put('system_initialized', 'true');
+    bootstrapped = true;
+    return;
+  }
+
+  // First-ever run
+  if (!config.adminPassword) {
     throw new Error('PAA_PASSWORD environment variable must be set');
   }
 
-  await bootstrap(env, config, storage);
+  const adminUsername = config.adminUsername;
+
+  // Hash password and create admin user record
+  const passwordHash = await hashPassword(config.adminPassword);
+  await createUser(env.APPDATA, adminUsername, passwordHash, { isAdmin: true });
+
+  // Bootstrap admin user's pod
+  await bootstrapUser(env, config, adminUsername, storage);
+
+  // Generate server-wide OIDC keys
+  await ensureOidcKeys(env);
+
+  // Mark as initialized and store the domain used
+  await env.APPDATA.put('system_initialized', 'true');
+  await env.APPDATA.put('bootstrap_domain', config.domain);
   bootstrapped = true;
 }
 
 /**
- * Perform full server bootstrap. Creates all the foundational data structures:
- *
- *   1. Hash the password and store the user record in APPDATA
- *   2. Generate an RSA keypair for ActivityPub HTTP Signatures
- *   3. Initialize ActivityPub collections (followers, following, inbox, outbox)
- *   4. Create root containers (/{user}/, /profile/, /public/, /private/, /settings/)
- *      with WAC ACLs and ACP policies
- *   5. Create the WebID profile document at /{user}/profile/card with:
- *      - foaf:Person type, name, oidcIssuer, storage root, inbox
- *      - ActivityPub public key for federation
- *      - PersonalProfileDocument metadata
- *   6. Create TypeIndex documents (private + public) in /settings/
- *   7. Mark bootstrap complete and record the domain
- *
- * Idempotent — skips resources that already exist.
+ * Bootstrap a single user's pod: containers, keypair, WebID profile, ACLs.
+ * Does NOT create the user record or hash passwords.
+ * @param {object} env
+ * @param {object} globalConfig - global config from getConfig()
+ * @param {string} username
+ * @param {import('@s20e/adapters/cloudflare').CloudflareAdapter} storage
  */
-async function bootstrap(env, config, storage) {
-  const { username, baseUrl } = config;
+export async function bootstrapUser(env, globalConfig, username, storage) {
+  const userConfig = getUserConfig(globalConfig, username);
+  const { baseUrl } = globalConfig;
 
-  // 1. Hash password and create user record (skip if already exists)
-  const existingUser = await env.APPDATA.get(`user:${username}`);
-  if (!existingUser) {
-    const passwordHash = await hashPassword(config.password);
-    await env.APPDATA.put(`user:${username}`, passwordHash);
-  }
-
-  // 2. Generate RSA keypair for ActivityPub (skip if already exists)
+  // Generate RSA keypair for ActivityPub (skip if already exists)
   let publicPem = await env.APPDATA.get(`ap_public_key:${username}`);
   if (!publicPem) {
     const keyPair = await generateRSAKeyPair();
@@ -80,7 +126,7 @@ async function bootstrap(env, config, storage) {
     publicPem = keyPair.publicPem;
   }
 
-  // 3. Initialize empty AP collections and friends list (skip if already exists)
+  // Initialize empty AP collections and friends list (skip if already exists)
   if (!await env.APPDATA.get(`ap_followers:${username}`)) {
     await env.APPDATA.put(`ap_followers:${username}`, '[]');
     await env.APPDATA.put(`ap_following:${username}`, '[]');
@@ -92,7 +138,7 @@ async function bootstrap(env, config, storage) {
     await env.APPDATA.put(`friends:${username}`, '[]');
   }
 
-  // 4. Create containers and their ACLs
+  // Create containers and their ACLs
   const containers = [
     `${baseUrl}/${username}/`,
     `${baseUrl}/${username}/profile/`,
@@ -101,12 +147,11 @@ async function bootstrap(env, config, storage) {
     `${baseUrl}/${username}/settings/`,
   ];
 
-  const webId = `${baseUrl}/${username}/profile/card#me`;
+  const webId = userConfig.webId;
   const rdf = PREFIXES.rdf;
   const ldp = PREFIXES.ldp;
   const acl = PREFIXES.acl;
   const foaf = PREFIXES.foaf;
-  const solid = PREFIXES.solid;
 
   for (const containerIri of containers) {
     // Write container type triple
@@ -127,7 +172,7 @@ async function bootstrap(env, config, storage) {
     }));
   }
 
-  // 5. Create WebID profile document
+  // Create WebID profile document
   const profileIri = `${baseUrl}/${username}/profile/card`;
   const profileNt = buildProfileNTriples(profileIri, webId, username, baseUrl, publicPem);
   await storage.put(`doc:${profileIri}:${webId}`, profileNt);
@@ -148,14 +193,15 @@ async function bootstrap(env, config, storage) {
     mode: 'public', agents: [], inherit: false,
   }));
 
-  // 6. Add profile/card to profile/ container
+  // Add profile/card to profile/ container
   const profileContainerIri = `${baseUrl}/${username}/profile/`;
   const containsNt = `${iri(profileContainerIri)} ${iri(ldp + 'contains')} ${iri(profileIri)} .`;
   const existingDoc = await storage.get(`doc:${profileContainerIri}:${profileContainerIri}`);
   await storage.put(`doc:${profileContainerIri}:${profileContainerIri}`,
     (existingDoc || '') + '\n' + containsNt);
 
-  // 6b. Create TypeIndex documents in settings/
+  // Create TypeIndex documents in settings/
+  const solid = PREFIXES.solid;
   const settingsIri = `${baseUrl}/${username}/settings/`;
   const privateTypeIndexIri = `${settingsIri}privateTypeIndex`;
   const publicTypeIndexIri = `${settingsIri}publicTypeIndex`;
@@ -182,10 +228,18 @@ async function bootstrap(env, config, storage) {
   const existingSettings = await storage.get(`doc:${settingsIri}:${settingsIri}`);
   await storage.put(`doc:${settingsIri}:${settingsIri}`,
     (existingSettings || '') + '\n' + settingsContainsNt);
+}
 
-  // 7. Mark as initialized and store the domain used
-  await env.APPDATA.put('user_initialized', 'true');
-  await env.APPDATA.put('bootstrap_domain', config.domain);
+/**
+ * Generate server-wide OIDC RSA keys if not already present.
+ */
+async function ensureOidcKeys(env) {
+  const existing = await env.APPDATA.get('oidc_public_key');
+  if (!existing) {
+    const keyPair = await generateRSAKeyPair();
+    await env.APPDATA.put('oidc_private_key', keyPair.privatePem);
+    await env.APPDATA.put('oidc_public_key', keyPair.publicPem);
+  }
 }
 
 function buildContainerAcl(resourceIri, webId, publicRead, acl, foaf) {
@@ -215,19 +269,14 @@ function buildContainerAcl(resourceIri, webId, publicRead, acl, foaf) {
 /**
  * Ensure ACP policies exist for core containers (migration for pre-ACP installs).
  */
-async function ensureAcpPolicies(env, config) {
-  const { username, baseUrl } = config;
+async function ensureAcpPolicies(env, config, username) {
+  const { baseUrl } = config;
   const policies = [
-    // Root container: private by default (safer default)
     [`acp:${baseUrl}/${username}/`, { mode: 'private', agents: [], inherit: true }],
-    // Profile: public (WebID must be readable)
     [`acp:${baseUrl}/${username}/profile/`, { mode: 'public', agents: [], inherit: true }],
     [`acp:${baseUrl}/${username}/profile/card`, { mode: 'public', agents: [], inherit: false }],
-    // Public container: public
     [`acp:${baseUrl}/${username}/public/`, { mode: 'public', agents: [], inherit: true }],
-    // Private container: private
     [`acp:${baseUrl}/${username}/private/`, { mode: 'private', agents: [], inherit: true }],
-    // Settings: private
     [`acp:${baseUrl}/${username}/settings/`, { mode: 'private', agents: [], inherit: true }],
   ];
 
@@ -242,8 +291,8 @@ async function ensureAcpPolicies(env, config) {
 /**
  * Ensure TypeIndex documents and profile references exist (migration for pre-TypeIndex installs).
  */
-async function ensureTypeIndex(env, config, storage) {
-  const { username, baseUrl } = config;
+async function ensureTypeIndex(env, config, username, storage) {
+  const { baseUrl } = config;
   const solid = PREFIXES.solid;
   const rdf = PREFIXES.rdf;
   const ldp = PREFIXES.ldp;
@@ -343,4 +392,3 @@ function buildProfileNTriples(profileIri, webId, username, baseUrl, publicPem) {
     `${iri(keyId)} ${iri('https://w3id.org/security#publicKeyPem')} ${literal(publicPem)} .`,
   ].join('\n');
 }
-

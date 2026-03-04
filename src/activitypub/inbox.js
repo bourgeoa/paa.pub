@@ -6,6 +6,8 @@ import { fetchRemoteActor, getActorPublicKey } from './remote.js';
 import { processFollow, processAccept, processUndo, processCreate } from './activities.js';
 import { deliverActivity, collectInboxes } from './delivery.js';
 import { validateExternalUrl } from '../security/ssrf.js';
+import { userExists } from '../users.js';
+import { getUserConfig } from '../config.js';
 
 /**
  * Handle POST /{user}/inbox (Server-to-Server)
@@ -14,9 +16,11 @@ export async function handleInbox(reqCtx) {
   const { request, params, config, env, ctx } = reqCtx;
   const username = params.user;
 
-  if (username !== config.username) {
+  if (!await userExists(env.APPDATA, username)) {
     return new Response('Not Found', { status: 404 });
   }
+
+  const uc = getUserConfig(config, username);
 
   // Parse activity
   let activity;
@@ -63,27 +67,30 @@ export async function handleInbox(reqCtx) {
     return new Response('Invalid signature', { status: 401 });
   }
 
+  // Build a user-scoped config for activity processing
+  const userScopedConfig = { ...config, ...uc };
+
   // Dispatch by activity type
   const type = activity.type;
   try {
     switch (type) {
       case 'Follow': {
         // Store as pending — owner accepts/rejects via the UI
-        await processFollow(activity, config, env, ctx);
+        await processFollow(activity, userScopedConfig, env, ctx);
         break;
       }
       case 'Accept':
-        await processAccept(activity, config, env);
+        await processAccept(activity, userScopedConfig, env);
         break;
       case 'Undo':
-        await processUndo(activity, config, env);
+        await processUndo(activity, userScopedConfig, env);
         break;
       case 'Create':
-        await processCreate(activity, config, env);
+        await processCreate(activity, userScopedConfig, env);
         break;
       default:
         // Store unknown activity types in inbox anyway
-        await processCreate(activity, config, env);
+        await processCreate(activity, userScopedConfig, env);
     }
   } catch (err) {
     console.error('Inbox processing error:', err);

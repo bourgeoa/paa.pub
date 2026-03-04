@@ -38,6 +38,29 @@ import { checkQuota, quotaExceededResponse, addQuota } from '../storage/quota.js
 import { checkContainerQuota, containerQuotaExceededResponse, addContainerBytes } from '../storage/container-quota.js';
 import { checkAppPermission, getAppPermission } from './app-permissions.js';
 import { resolveContentType } from './media-types.js';
+import { getUserConfig } from '../config.js';
+import { getUserStorageLimit } from '../users.js';
+
+/**
+ * Extract the resource owner's username from a resource IRI.
+ * The IRI pattern is: {baseUrl}/{username}/...
+ */
+function extractOwner(resourceIri, baseUrl) {
+  const path = resourceIri.slice(baseUrl.length + 1); // strip "https://domain.com/"
+  const slash = path.indexOf('/');
+  return slash > 0 ? path.slice(0, slash) : path;
+}
+
+/**
+ * Check if a resource is a system path that OIDC apps should be allowed to
+ * write without explicit container permission. Type indexes and settings
+ * are required by the Solid protocol — all authorized apps need to register
+ * their type mappings there to function correctly.
+ */
+function isSystemPath(resourceIri, baseUrl, owner) {
+  const settingsPrefix = `${baseUrl}/${owner}/settings/`;
+  return resourceIri.startsWith(settingsPrefix);
+}
 
 const RDF_TYPES = new Set([
   'text/turtle',
@@ -82,7 +105,8 @@ export async function handleLDP(reqCtx) {
 
   // Handle .acr resources (ACP)
   if (url.pathname.endsWith('.acr')) {
-    if (reqCtx.user !== config.username) {
+    const acrOwner = extractOwner(resourceIri, config.baseUrl);
+    if (reqCtx.user !== acrOwner) {
       return new Response('Forbidden', { status: 403 });
     }
     const baseIri = resourceIri.slice(0, -4);
@@ -94,28 +118,26 @@ export async function handleLDP(reqCtx) {
     return new Response('Method Not Allowed', { status: 405 });
   }
 
-  // App read permission check (OIDC apps only)
-  if ((request.method === 'GET' || request.method === 'HEAD') && reqCtx.authMethod === 'oidc' && reqCtx.clientId) {
-    const allowed = await checkAppPermission(reqCtx.env.APPDATA, config.username, reqCtx.clientId, resourceIri);
-    if (!allowed) {
-      return new Response('Forbidden — app not authorized for this resource', { status: 403 });
-    }
-  }
+  // OIDC apps can read any resource the authenticated owner can read.
+  // App permissions only restrict writes — reads are governed by ACP policies,
+  // and Solid apps need to read discovery documents (type indexes, profile, etc.)
+  // to function correctly.
 
   // Content negotiation for HTML — serve rendered page or index.html from container
   const accept = request.headers.get('Accept') || '';
   if ((request.method === 'GET' || request.method === 'HEAD') && isContainer(resourceIri) && accept.includes('text/html') && !wantsActivityPub(accept)) {
-    const rootContainerIri = `${config.baseUrl}/${config.username}/`;
+    const containerOwner = extractOwner(resourceIri, config.baseUrl);
+    const containerOwnerUc = getUserConfig(config, containerOwner);
+    const rootContainerIri = `${config.baseUrl}/${containerOwner}/`;
 
-    // For the root container, render profile page from layout JSON.
+    // For a user's root container, render profile page from layout JSON.
     // Skip ACP check — the profile page renders public profile data
     // (same as /profile/card which is already public).
     if (resourceIri === rootContainerIri) {
       try {
         const { renderLayout, DEFAULT_LAYOUT } = await import('../ui/layout-renderer.js');
-        const profileData = await buildProfileTemplateData(reqCtx.storage, config, reqCtx.env.APPDATA);
-        const layoutRaw = await reqCtx.env.APPDATA.get(`profile_layout:${config.username}`);
-        const layout = layoutRaw ? JSON.parse(layoutRaw) : DEFAULT_LAYOUT;
+        const profileData = await buildProfileTemplateData(reqCtx.storage, { ...config, ...containerOwnerUc }, reqCtx.env.APPDATA);
+        const layoutRaw = await reqCtx.env.APPDATA.get(`profile_layout:${containerOwner}`);
         const htmlContent = new TextEncoder().encode(renderLayout(layout, profileData));
         const htmlHeaders = new Headers();
         htmlHeaders.set('Content-Type', 'text/html; charset=utf-8');
@@ -133,8 +155,8 @@ export async function handleLDP(reqCtx) {
     const indexIri = resourceIri + 'index.html';
     const indexBlob = await reqCtx.storage.getBlob(`blob:${indexIri}`);
     if (indexBlob) {
-      const agent = reqCtx.user ? config.webId : null;
-      const access = await checkAcpAccess(reqCtx.env.APPDATA, indexIri, agent, config.webId, config.username);
+      const agent = reqCtx.userConfig ? reqCtx.userConfig.webId : null;
+      const access = await checkAcpAccess(reqCtx.env.APPDATA, indexIri, agent, containerOwnerUc.webId, containerOwner);
       if (!access.readable) {
         return denyAccess(agent, config.baseUrl);
       }
@@ -173,7 +195,9 @@ export async function handleLDP(reqCtx) {
  */
 async function handleGet(reqCtx, resourceIri) {
   const { request, config, storage, env, url } = reqCtx;
-  const agent = reqCtx.user ? config.webId : null;
+  const owner = extractOwner(resourceIri, config.baseUrl);
+  const ownerUc = getUserConfig(config, owner);
+  const agent = reqCtx.userConfig ? reqCtx.userConfig.webId : null;
 
   // Check if the resource exists in KV
   const idx = await storage.get(`idx:${resourceIri}`);
@@ -188,7 +212,7 @@ async function handleGet(reqCtx, resourceIri) {
     }
 
     // Serve orphan blob — always check ACP (owner handled inside checkAcpAccess)
-    const access = await checkAcpAccess(env.APPDATA, resourceIri, agent, config.webId, config.username);
+    const access = await checkAcpAccess(env.APPDATA, resourceIri, agent, ownerUc.webId, owner);
     if (!access.readable) {
       return denyAccess(agent, config.baseUrl);
     }
@@ -200,12 +224,12 @@ async function handleGet(reqCtx, resourceIri) {
   }
 
   // Check ACP access — always run (owner is handled inside checkAcpAccess)
-  const access = await checkAcpAccess(env.APPDATA, resourceIri, agent, config.webId, config.username);
+  const access = await checkAcpAccess(env.APPDATA, resourceIri, agent, ownerUc.webId, owner);
   if (!access.readable) {
     return denyAccess(agent, config.baseUrl);
   }
 
-  const isOwner = reqCtx.user === config.username;
+  const isOwner = reqCtx.user === owner;
   const wacAllow = isOwner
     ? buildWacAllow({ user: ['read', 'write', 'append', 'control'], public: [] })
     : buildWacAllow({ user: agent ? ['read'] : [], public: [] });
@@ -255,7 +279,7 @@ async function handleGet(reqCtx, resourceIri) {
   // For OIDC apps reading an ancestor container, filter ldp:contains to only
   // show resources the app is authorized to access
   if (reqCtx.authMethod === 'oidc' && reqCtx.clientId && isContainer(resourceIri)) {
-    const perm = await getAppPermission(env.APPDATA, config.username, reqCtx.clientId);
+    const perm = await getAppPermission(env.APPDATA, owner, reqCtx.clientId);
     if (perm) {
       const allowed = perm.allowedContainers || [];
       const ldpContains = `<${PREFIXES.ldp}contains>`;
@@ -270,7 +294,7 @@ async function handleGet(reqCtx, resourceIri) {
     }
   }
 
-  const mergedPrefixes = await loadMergedPrefixes(env.APPDATA, config.username);
+  const mergedPrefixes = await loadMergedPrefixes(env.APPDATA, owner);
   const prefixNames = Object.keys(mergedPrefixes);
 
   const accept = request.headers.get('Accept') || 'text/turtle';
@@ -296,7 +320,8 @@ async function handleGet(reqCtx, resourceIri) {
  */
 async function handlePut(reqCtx, resourceIri) {
   const { request, orchestrator, config, storage, env } = reqCtx;
-  const agent = reqCtx.user ? config.webId : null;
+  const owner = extractOwner(resourceIri, config.baseUrl);
+  const agent = reqCtx.userConfig ? reqCtx.userConfig.webId : null;
   const contentType = resolveContentType(request.headers.get('Content-Type'), resourceIri);
 
   if (!agent) {
@@ -304,9 +329,9 @@ async function handlePut(reqCtx, resourceIri) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  // App write permission check (OIDC apps only)
-  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId) {
-    const allowed = await checkAppPermission(env.APPDATA, config.username, reqCtx.clientId, resourceIri);
+  // App write permission check (OIDC apps only) — skip for system paths
+  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId && !isSystemPath(resourceIri, config.baseUrl, owner)) {
+    const allowed = await checkAppPermission(env.APPDATA, owner, reqCtx.clientId, resourceIri);
     if (!allowed) {
       console.log(`[ldp] PUT ${resourceIri} rejected: app ${reqCtx.clientId} not authorized`);
       return new Response('Forbidden — app not authorized for this container', { status: 403 });
@@ -320,7 +345,8 @@ async function handlePut(reqCtx, resourceIri) {
     const binaryData = binary;
 
     // Quota checks
-    const quotaResult = await checkQuota(env.APPDATA, config.username, binaryData.byteLength, config.storageLimit);
+    const userStorageLimit = await getUserStorageLimit(env.APPDATA, owner, config.storageLimit);
+    const quotaResult = await checkQuota(env.APPDATA, owner, binaryData.byteLength, userStorageLimit);
     if (!quotaResult.allowed) return quotaExceededResponse(quotaResult.usedBytes, quotaResult.limitBytes);
     const parent = parentContainer(resourceIri);
     if (parent) {
@@ -348,7 +374,7 @@ async function handlePut(reqCtx, resourceIri) {
     }
 
     // Update quota tracking
-    await addQuota(env.APPDATA, config.username, binaryData.byteLength);
+    await addQuota(env.APPDATA, owner, binaryData.byteLength);
     if (parent) await addContainerBytes(env.APPDATA, parent, binaryData.byteLength);
 
     const status = existingBinaryIdx ? 204 : 201;
@@ -436,7 +462,8 @@ async function handlePut(reqCtx, resourceIri) {
  */
 async function handlePost(reqCtx, resourceIri) {
   const { request, orchestrator, config, url, storage, env } = reqCtx;
-  const agent = reqCtx.user ? config.webId : null;
+  const owner = extractOwner(resourceIri, config.baseUrl);
+  const agent = reqCtx.userConfig ? reqCtx.userConfig.webId : null;
 
   // Normalize: treat /path as /path/ for POST (container operations)
   if (!isContainer(resourceIri)) {
@@ -447,9 +474,9 @@ async function handlePost(reqCtx, resourceIri) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  // App write permission check (OIDC apps only)
-  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId) {
-    const allowed = await checkAppPermission(env.APPDATA, config.username, reqCtx.clientId, resourceIri);
+  // App write permission check (OIDC apps only) — skip for system paths
+  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId && !isSystemPath(resourceIri, config.baseUrl, owner)) {
+    const allowed = await checkAppPermission(env.APPDATA, owner, reqCtx.clientId, resourceIri);
     if (!allowed) {
       console.log(`[ldp] POST ${resourceIri} rejected: app ${reqCtx.clientId} not authorized`);
       return new Response('Forbidden — app not authorized for this container', { status: 403 });
@@ -488,7 +515,8 @@ async function handlePost(reqCtx, resourceIri) {
     const binary = await request.arrayBuffer();
 
     // Quota checks
-    const quotaResult = await checkQuota(env.APPDATA, config.username, binary.byteLength, config.storageLimit);
+    const userStorageLimit2 = await getUserStorageLimit(env.APPDATA, owner, config.storageLimit);
+    const quotaResult = await checkQuota(env.APPDATA, owner, binary.byteLength, userStorageLimit2);
     if (!quotaResult.allowed) return quotaExceededResponse(quotaResult.usedBytes, quotaResult.limitBytes);
     const cqResult = await checkContainerQuota(env.APPDATA, resourceIri, binary.byteLength);
     if (!cqResult.allowed) return containerQuotaExceededResponse(cqResult.blockedBy, cqResult.usedBytes, cqResult.limitBytes);
@@ -505,7 +533,7 @@ async function handlePost(reqCtx, resourceIri) {
     }
 
     // Update quota tracking
-    await addQuota(env.APPDATA, config.username, binary.byteLength);
+    await addQuota(env.APPDATA, owner, binary.byteLength);
     await addContainerBytes(env.APPDATA, resourceIri, binary.byteLength);
 
     await appendContainment(storage, resourceIri, newResourceIri);
@@ -536,9 +564,10 @@ async function handlePatch(reqCtx, resourceIri) {
   const { request, config, storage, env } = reqCtx;
   if (!reqCtx.user) return new Response('Unauthorized', { status: 401 });
 
-  // App write permission check (OIDC apps only)
-  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId) {
-    const allowed = await checkAppPermission(env.APPDATA, config.username, reqCtx.clientId, resourceIri);
+  const patchOwner = extractOwner(resourceIri, config.baseUrl);
+  // App write permission check (OIDC apps only) — skip for system paths
+  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId && !isSystemPath(resourceIri, config.baseUrl, patchOwner)) {
+    const allowed = await checkAppPermission(env.APPDATA, patchOwner, reqCtx.clientId, resourceIri);
     if (!allowed) {
       console.log(`[ldp] PATCH ${resourceIri} rejected: app ${reqCtx.clientId} not authorized`);
       return new Response('Forbidden — app not authorized for this container', { status: 403 });
@@ -595,12 +624,13 @@ async function handlePatch(reqCtx, resourceIri) {
  */
 async function handleDelete(reqCtx, resourceIri) {
   const { config, storage, env } = reqCtx;
+  const deleteOwner = extractOwner(resourceIri, config.baseUrl);
   if (!reqCtx.user) return new Response('Unauthorized', { status: 401 });
-  if (reqCtx.user !== config.username) return new Response('Forbidden', { status: 403 });
+  if (reqCtx.user !== deleteOwner) return new Response('Forbidden', { status: 403 });
 
-  // App write permission check (OIDC apps only)
-  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId) {
-    const allowed = await checkAppPermission(env.APPDATA, config.username, reqCtx.clientId, resourceIri);
+  // App write permission check (OIDC apps only) — skip for system paths
+  if (reqCtx.authMethod === 'oidc' && reqCtx.clientId && !isSystemPath(resourceIri, config.baseUrl, deleteOwner)) {
+    const allowed = await checkAppPermission(env.APPDATA, deleteOwner, reqCtx.clientId, resourceIri);
     if (!allowed) {
       console.log(`[ldp] DELETE ${resourceIri} rejected: app ${reqCtx.clientId} not authorized`);
       return new Response('Forbidden — app not authorized for this container', { status: 403 });
@@ -650,7 +680,7 @@ async function handleDelete(reqCtx, resourceIri) {
   if (deletedBytes > 0) {
     const { subtractQuota } = await import('../storage/quota.js');
     const { subtractContainerBytes } = await import('../storage/container-quota.js');
-    await subtractQuota(env.APPDATA, config.username, deletedBytes);
+    await subtractQuota(env.APPDATA, deleteOwner, deletedBytes);
     if (parent) await subtractContainerBytes(env.APPDATA, parent, deletedBytes);
   }
 

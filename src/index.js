@@ -16,8 +16,9 @@
  *   - env        — Cloudflare Worker env bindings (KV, R2, secrets)
  *   - ctx        — Cloudflare execution context (for waitUntil)
  *   - url        — parsed URL object
- *   - config     — server config (username, domain, baseUrl, webId)
+ *   - config     — server config (adminUsername, domain, baseUrl, etc.)
  *   - user       — authenticated username or null
+ *   - userConfig — user-specific config (webId, actorId, keyId) or null
  *   - authMethod — 'session' | 'oidc' | null
  *   - clientId   — OIDC client_id (from JWT) or null
  *   - params     — URL pattern parameters (e.g. { user: 'alice' })
@@ -29,9 +30,10 @@ import { CloudflareAdapter } from '@s20e/adapters/cloudflare';
 import { initSync, Kernel } from '@s20e/kernel';
 import wasmModule from '@s20e/kernel/_wasm/s20e-kernel_bg.wasm';
 import { Router } from './router.js';
-import { getConfig } from './config.js';
+import { getConfig, getUserConfig } from './config.js';
 import { ensureBootstrapped } from './bootstrap.js';
 import { extractUser } from './auth/middleware.js';
+import { userExists } from './users.js';
 import { handleLogin, handleLogout } from './auth/session.js';
 import { handleWebAuthnRegisterBegin, handleWebAuthnRegisterComplete, handleWebAuthnLoginBegin, handleWebAuthnLoginComplete, handleWebAuthnRename, handleWebAuthnDelete } from './auth/webauthn.js';
 import { handleWebFinger } from './activitypub/webfinger.js';
@@ -49,6 +51,12 @@ import { renderAclEditor, handleAclUpdate } from './ui/pages/acl-editor.js';  //
 import { renderProfileEditor, handleProfileUpdate, handleProfileIndexReset, handleDiscoverNs, handlePreviewLayout, handleListComponents, handleSaveComponent, handleImportComponent } from './ui/pages/profile-editor.js';
 import { renderAppPermissions, handleAppPermissionsUpdate } from './ui/pages/app-permissions.js';
 import { handleDiscovery, handleJwks, handleRegister, handleAuthorize, handleToken, handleUserInfo, verifyAccessToken } from './oidc.js';
+import { renderSignupPage, handleSignup } from './auth/registration.js';
+import { handleWebIdentity, handleFedCMConfig, handleFedCMAccounts, handleFedCMAssertion, handleFedCMClientMetadata, handleFedCMDisconnect, handleFedCMVerify } from './fedcm.js';
+import { renderPage } from './ui/shell.js';
+import landingTemplate from './ui/templates/landing.html';
+import { renderAdminDashboard } from './admin/dashboard.js';
+import { renderAdminUsers, handleAdminUserAction } from './admin/users.js';
 import { checkRateLimit, rateLimitResponse } from './security/rate-limit.js';
 import { checkContentLength, getSizeLimit } from './security/size-limit.js';
 
@@ -74,11 +82,24 @@ function buildRouter() {
   router.get('/userinfo', handleUserInfo);
   router.post('/register', handleRegister);
 
+  // FedCM endpoints
+  router.get('/.well-known/web-identity', handleWebIdentity);
+  router.get('/fedcm/config.json', handleFedCMConfig);
+  router.get('/fedcm/accounts', handleFedCMAccounts);
+  router.post('/fedcm/assertion', handleFedCMAssertion);
+  router.get('/fedcm/client-metadata', handleFedCMClientMetadata);
+  router.post('/fedcm/disconnect', handleFedCMDisconnect);
+  router.post('/fedcm/verify', handleFedCMVerify);
+
   // Public routes
   router.get('/.well-known/webfinger', handleWebFinger);
   router.get('/login', renderLoginPage);
   router.post('/login', handleLogin);
   router.post('/logout', handleLogout);
+
+  // Registration
+  router.get('/signup', renderSignupPage);
+  router.post('/signup', handleSignup);
 
   // WebAuthn
   router.post('/webauthn/register/begin', handleWebAuthnRegisterBegin);
@@ -87,6 +108,11 @@ function buildRouter() {
   router.post('/webauthn/login/complete', handleWebAuthnLoginComplete);
   router.post('/webauthn/rename', handleWebAuthnRename);
   router.post('/webauthn/delete', handleWebAuthnDelete);
+
+  // Admin panel
+  router.get('/admin', renderAdminDashboard);
+  router.get('/admin/users', renderAdminUsers);
+  router.post('/admin/users', handleAdminUserAction);
 
   // Authenticated UI routes
   router.get('/dashboard', renderDashboard);
@@ -151,11 +177,26 @@ function getRateLimitCategory(method, pathname, handler) {
   if (method === 'POST' && (pathname === '/login' || pathname === '/authorize')) return 'login';
   if (method === 'POST' && pathname.startsWith('/webauthn/login/')) return 'webauthn';
   if (method === 'POST' && pathname === '/token') return 'token';
+  if (method === 'POST' && pathname === '/fedcm/assertion') return 'token';
+  if (method === 'POST' && pathname === '/fedcm/verify') return 'login';
   if (method === 'POST' && pathname === '/register') return 'register';
+  if (method === 'POST' && pathname === '/signup') return 'register';
   if (method === 'POST' && (pathname === '/inbox' || pathname.match(/^\/[^/]+\/inbox$/))) return 'inbox';
   // LDP write operations
   if (handler === handleLDP && ['PUT', 'POST', 'PATCH', 'DELETE'].includes(method)) return 'write';
   return null;
+}
+
+/**
+ * Extract username from a webId URL that matches our server's pattern.
+ * Returns the username or null if the webId doesn't match.
+ */
+function extractUsernameFromWebId(webId, baseUrl) {
+  if (!webId || !webId.startsWith(baseUrl + '/')) return null;
+  const rest = webId.slice(baseUrl.length + 1); // "username/profile/card#me"
+  const slash = rest.indexOf('/');
+  if (slash <= 0) return null;
+  return rest.slice(0, slash);
 }
 
 export default {
@@ -182,22 +223,35 @@ export default {
 
     if (!user) {
       const tokenResult = await verifyAccessToken(request, env, config);
-      if (tokenResult && tokenResult.webId === config.webId) {
-        user = config.username;
-        authMethod = 'oidc';
-        clientId = tokenResult.clientId;
+      if (tokenResult) {
+        // Extract username from the token's webId
+        const tokenUsername = extractUsernameFromWebId(tokenResult.webId, config.baseUrl);
+        if (tokenUsername && await userExists(env.APPDATA, tokenUsername)) {
+          user = tokenUsername;
+          authMethod = 'oidc';
+          clientId = tokenResult.clientId;
+        }
       }
     }
+
+    // Build user-specific config if authenticated
+    const userConfig = user ? getUserConfig(config, user) : null;
 
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
       return applyCors(new Response(null, { status: 204 }), request);
     }
 
-    // Root redirect
+    // Root: landing page (unauthenticated) or redirect to dashboard (authenticated)
     if (url.pathname === '/') {
-      const dest = user ? '/dashboard' : '/login';
-      return applyCors(new Response(null, { status: 302, headers: { 'Location': dest } }), request);
+      if (user) {
+        return applyCors(new Response(null, { status: 302, headers: { 'Location': '/dashboard' } }), request);
+      }
+      const landing = await renderPage('Welcome', landingTemplate, {
+        siteName: config.domain,
+        registrationOpen: config.registrationMode !== 'closed',
+      });
+      return applyCors(landing, request);
     }
 
     // Route dispatch
@@ -237,6 +291,7 @@ export default {
       url,
       config,
       user,
+      userConfig,
       authMethod,
       clientId,
       params: match.params,

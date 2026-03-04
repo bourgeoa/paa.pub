@@ -89,6 +89,14 @@ details > summary > h2 { display: inline; }
 .login-card { max-width: 400px; margin: 4rem auto; }
 .login-card-wide { max-width: 450px; margin: 4rem auto; }
 
+/* ── Landing page ────────────────────────────────────── */
+.landing-header { text-align: center; margin: 3rem 0 2rem; }
+.landing-header h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+.landing-cards { display: grid; grid-template-columns: 1fr; gap: 1.5rem; max-width: 800px; margin: 0 auto; }
+.landing-cards .card { margin: 0; }
+.landing-cards .card h2 { font-size: 1.2rem; margin-bottom: 1rem; }
+@media (min-width: 640px) { .landing-cards { grid-template-columns: repeat(2, 1fr); } }
+
 /* ── Stats grid ──────────────────────────────────────── */
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
 .stat-number { font-size: 2rem; font-weight: 700; }

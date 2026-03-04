@@ -1,0 +1,49 @@
+<div class="card">
+  <h1>Admin Dashboard</h1>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-value">{{totalUsers}}</div>
+      <div class="stat-label">Total Users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{totalStorage}}</div>
+      <div class="stat-label">Total Storage</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{totalPosts}}</div>
+      <div class="stat-label">Total Posts</div>
+    </div>
+  </div>
+
+  <h2>Users</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Storage</th>
+        <th>Followers</th>
+        <th>Posts</th>
+        <th>Status</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#users}}
+      <tr>
+        <td>
+          <a href="/{{username}}/">{{username}}</a>
+          {{#isAdmin}}<span class="badge">admin</span>{{/isAdmin}}
+        </td>
+        <td>{{storageDisplay}}</td>
+        <td>{{followersCount}}</td>
+        <td>{{postsCount}}</td>
+        <td>{{#disabled}}<span class="text-danger">Disabled</span>{{/disabled}}{{^disabled}}<span class="text-success">Active</span>{{/disabled}}</td>
+        <td>{{createdShort}}</td>
+      </tr>
+      {{/users}}
+    </tbody>
+  </table>
+
+  <p class="mt-1"><a href="/admin/users" class="btn btn-secondary">Manage Users</a></p>
+</div>
