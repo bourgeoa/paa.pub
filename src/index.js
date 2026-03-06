@@ -37,6 +37,7 @@ import { userExists } from './users.js';
 import { handleLogin, handleLogout } from './auth/session.js';
 import { handleWebAuthnRegisterBegin, handleWebAuthnRegisterComplete, handleWebAuthnLoginBegin, handleWebAuthnLoginComplete, handleWebAuthnRename, handleWebAuthnDelete } from './auth/webauthn.js';
 import { handleWebFinger } from './activitypub/webfinger.js';
+import { handleUserDidDocument, handleServerDidDocument } from './did/document.js';
 import { handleActor } from './activitypub/actor.js';
 import { handleInbox } from './activitypub/inbox.js';
 import { handleOutbox, handleCompose, handleFollow, handleUnfollow, handleAcceptFollowRequest, handleRejectFollowRequest } from './activitypub/outbox.js';
@@ -97,6 +98,7 @@ function buildRouter() {
 
   // Public routes
   router.get('/.well-known/webfinger', handleWebFinger);
+  router.get('/.well-known/did.json', handleServerDidDocument);
   router.get('/login', renderLoginPage);
   router.post('/login', handleLogin);
   router.post('/logout', handleLogout);
@@ -171,6 +173,7 @@ function buildRouter() {
   router.get('/:user/outbox', handleOutbox);
   router.get('/:user/followers', handleCollections);
   router.get('/:user/following', handleCollections);
+  router.get('/:user/did.json', handleUserDidDocument);
 
   // LDP catch-all
   router.add('*', '/:user/**', handleLDP);

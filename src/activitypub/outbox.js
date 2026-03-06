@@ -119,15 +119,30 @@ export async function handleCompose(reqCtx) {
     const followersData = await env.APPDATA.get(`ap_followers:${username}`);
     const followers = JSON.parse(followersData || '[]');
     if (followers.length > 0) {
-      const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
-      const inboxUrls = await collectInboxes(followers, env.APPDATA);
-      deliverActivity({
-        activityJson: JSON.stringify(activity),
-        inboxUrls,
-        keyId: uc.keyId,
-        privatePem,
-        ctx,
-      });
+      // Separate local and remote followers
+      const remoteFollowers = [];
+      for (const followerUri of followers) {
+        const localUser = resolveLocalUser(followerUri, config);
+        if (localUser && await userExists(env.APPDATA, localUser)) {
+          // Deliver directly to local user's inbox via KV
+          await storeInboxActivity(activity, localUser, env);
+        } else {
+          remoteFollowers.push(followerUri);
+        }
+      }
+
+      // Deliver to remote followers via HTTP
+      if (remoteFollowers.length > 0) {
+        const privatePem = await env.APPDATA.get(`ap_private_key:${username}`);
+        const inboxUrls = await collectInboxes(remoteFollowers, env.APPDATA);
+        deliverActivity({
+          activityJson: JSON.stringify(activity),
+          inboxUrls,
+          keyId: uc.keyId,
+          privatePem,
+          ctx,
+        });
+      }
     }
   }
 

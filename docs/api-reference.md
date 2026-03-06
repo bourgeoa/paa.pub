@@ -20,6 +20,7 @@ These implement the Solid-OIDC specification for authenticating with Solid apps.
 | Method | Path | Handler | Auth | Description |
 |---|---|---|---|---|
 | GET | `/.well-known/webfinger` | `handleWebFinger` | No | WebFinger discovery |
+| GET | `/.well-known/did.json` | `handleServerDidDocument` | No | Server-level DID document |
 | GET | `/login` | `renderLoginPage` | No | Login form |
 | POST | `/login` | `handleLogin` | No | Process login (sets session cookie) |
 | POST | `/logout` | `handleLogout` | No | Destroy session |
@@ -87,6 +88,7 @@ Content-negotiated endpoints that serve both Solid RDF and ActivityPub JSON-LD.
 | GET | `/:user/outbox` | `handleOutbox` | No | Outbox OrderedCollection |
 | GET | `/:user/followers` | `handleCollections` | No | Followers OrderedCollection |
 | GET | `/:user/following` | `handleCollections` | No | Following OrderedCollection |
+| GET | `/:user/did.json` | `handleUserDidDocument` | No | Per-user DID document (`did:web`) |
 
 ## LDP catch-all (Solid protocol)
 
@@ -119,6 +121,10 @@ Response (`application/jrd+json`):
 ```json
 {
   "subject": "acct:alice@example.com",
+  "aliases": [
+    "https://example.com/alice/profile/card#me",
+    "did:web:example.com:alice"
+  ],
   "links": [
     {
       "rel": "self",
@@ -129,6 +135,11 @@ Response (`application/jrd+json`):
       "rel": "http://webfinger.net/rel/profile-page",
       "type": "text/html",
       "href": "https://example.com/alice/profile/card"
+    },
+    {
+      "rel": "self",
+      "type": "application/did+ld+json",
+      "href": "https://example.com/alice/did.json"
     }
   ]
 }

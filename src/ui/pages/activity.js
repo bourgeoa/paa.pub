@@ -10,6 +10,7 @@ import template from '../templates/activity.html';
 import { requireAuth } from '../../auth/middleware.js';
 import { simpleHash } from '../../utils.js';
 import { fetchRemoteActor } from '../../activitypub/remote.js';
+import { userExists } from '../../users.js';
 import { getTranslations } from '../../i18n/index.js';
 import { formatDateTime } from '../../i18n/format.js';
 
@@ -145,39 +146,51 @@ export async function renderRemoteFeed(reqCtx) {
 
   const feedLimit = config.feedLimit;
 
-  // Fetch the remote actor to get their outbox URL
-  const actor = await fetchRemoteActor(actorUri, env.APPDATA);
-  if (!actor || !actor.outbox) {
-    return renderPage(t.act_remote_feed, `<h1>${escapeHtml(t.act_remote_feed)}</h1><div class="card"><div class="text-muted">${escapeHtml(t.act_could_not_load)}</div><a href="/activity" class="btn mt-05">${escapeHtml(t.act_back)}</a></div>`, {}, { user: username, config, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl, lang });
-  }
+  // Resolve actor and outbox — local actors are read from KV directly
+  let actor, items = [];
+  const localTarget = resolveLocalUsername(actorUri, config);
 
-  // Fetch the outbox collection
-  let items = [];
-  try {
-    const outboxRes = await fetch(actor.outbox, {
-      headers: { 'Accept': 'application/activity+json, application/ld+json' },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (outboxRes.ok) {
-      const outbox = await outboxRes.json();
-      // If it has orderedItems directly, use them
-      if (outbox.orderedItems) {
-        items = outbox.orderedItems.slice(0, feedLimit);
-      } else if (outbox.first) {
-        // Fetch the first page
-        const firstUrl = typeof outbox.first === 'string' ? outbox.first : outbox.first.id || outbox.first;
-        const pageRes = await fetch(firstUrl, {
-          headers: { 'Accept': 'application/activity+json, application/ld+json' },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (pageRes.ok) {
-          const page = await pageRes.json();
-          items = (page.orderedItems || []).slice(0, feedLimit);
+  if (localTarget && await userExists(env.APPDATA, localTarget)) {
+    // Local actor: read outbox directly from KV storage
+    actor = { preferredUsername: localTarget, name: localTarget, outbox: `${config.baseUrl}/${localTarget}/outbox` };
+    const indexData = await env.APPDATA.get(`ap_outbox_index:${localTarget}`);
+    const index = JSON.parse(indexData || '[]').slice(0, feedLimit);
+    const results = await Promise.all(
+      index.map(entry => env.APPDATA.get(`ap_outbox_item:${simpleHash(entry.id)}`))
+    );
+    items = results.filter(Boolean).map(d => JSON.parse(d));
+  } else {
+    // Remote actor: fetch via HTTP
+    actor = await fetchRemoteActor(actorUri, env.APPDATA);
+    if (!actor || !actor.outbox) {
+      return renderPage(t.act_remote_feed, `<h1>${escapeHtml(t.act_remote_feed)}</h1><div class="card"><div class="text-muted">${escapeHtml(t.act_could_not_load)}</div><a href="/activity" class="btn mt-05">${escapeHtml(t.act_back)}</a></div>`, {}, { user: username, config, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl, lang });
+    }
+
+    // Fetch the outbox collection
+    try {
+      const outboxRes = await fetch(actor.outbox, {
+        headers: { 'Accept': 'application/activity+json, application/ld+json' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (outboxRes.ok) {
+        const outbox = await outboxRes.json();
+        if (outbox.orderedItems) {
+          items = outbox.orderedItems.slice(0, feedLimit);
+        } else if (outbox.first) {
+          const firstUrl = typeof outbox.first === 'string' ? outbox.first : outbox.first.id || outbox.first;
+          const pageRes = await fetch(firstUrl, {
+            headers: { 'Accept': 'application/activity+json, application/ld+json' },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (pageRes.ok) {
+            const page = await pageRes.json();
+            items = (page.orderedItems || []).slice(0, feedLimit);
+          }
         }
       }
+    } catch (e) {
+      console.error(`Failed to fetch remote outbox for ${actorUri}:`, e);
     }
-  } catch (e) {
-    console.error(`Failed to fetch remote outbox for ${actorUri}:`, e);
   }
 
   // Process items for display
@@ -214,6 +227,13 @@ ${activities.map(a => `<div class="card">
 </div>`).join('\n')}`;
 
   return renderPage(t.act_remote_feed, body, {}, { user: username, config, nav: 'activity', storage: reqCtx.storage, baseUrl: config.baseUrl, lang });
+}
+
+function resolveLocalUsername(actorUri, config) {
+  if (!actorUri.startsWith(config.baseUrl + '/')) return null;
+  const parts = actorUri.slice(config.baseUrl.length + 1).split('/');
+  if (parts[1] === 'profile' && parts[2]?.startsWith('card')) return parts[0];
+  return null;
 }
 
 function escapeHtml(str) {

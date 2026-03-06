@@ -8,6 +8,7 @@ Own your identity and data. Your server provides:
 - A **Solid Pod** per user — store and manage RDF and binary resources with full LDP protocol support
 - **ActivityPub federation** — follow and be followed by accounts on Mastodon, Pixelfed, and other fediverse servers, plus local following between users on the same server
 - A **WebID profile** — a standards-based decentralized identity for each user
+- **Decentralized Identifiers (DID)** — each user gets a [`did:web`](https://w3c-ccg.github.io/did-method-web/) DID document, bidirectionally linked to their WebID and ActivityPub actor
 - **OIDC provider** — authenticate with Solid apps using your server as the identity provider
 - **FedCM identity provider** — browser-native account picker for streamlined login on third-party sites and re-authentication on your own server
 - A **web UI** — dashboard, profile editor, activity feed, file browser, access control editor, settings, and admin panel
@@ -281,7 +282,21 @@ curl -H "Accept: application/activity+json" https://solid.example.com/alice/outb
 curl -H "Accept: application/activity+json" https://solid.example.com/alice/followers
 ```
 
-Remote servers can follow any account by sending a `Follow` activity to `/{username}/inbox`. Follow requests are held pending until the user accepts or rejects them from the activity page. Users on the same server can follow each other directly without federation overhead.
+Remote servers can follow any account by sending a `Follow` activity to `/{username}/inbox`. Follow requests are held pending until the user accepts or rejects them from the activity page. Users on the same server can follow each other directly — posts are delivered to local followers' inboxes via direct KV writes, without HTTP federation overhead.
+
+### Decentralized Identifiers (DID)
+
+Each user has a [`did:web`](https://w3c-ccg.github.io/did-method-web/) DID document:
+
+```sh
+# Per-user DID document
+curl https://solid.example.com/alice/did.json
+
+# Server-level DID document
+curl https://solid.example.com/.well-known/did.json
+```
+
+The DID document contains the user's public key (as JWK), service endpoints for Solid storage, ActivityPub, and OIDC, and `alsoKnownAs` links to the WebID and acct URI. The WebID profile links back via `owl:sameAs`, and the ActivityPub actor includes the DID in `alsoKnownAs`.
 
 ### OIDC provider
 
@@ -439,15 +454,17 @@ src/
 │   ├── media-types.js    # Extension-to-media-type resolution
 │   └── app-permissions.js # OIDC app write permission enforcement
 ├── activitypub/
-│   ├── actor.js          # Actor JSON-LD document
-│   ├── webfinger.js      # WebFinger endpoint
+│   ├── actor.js          # Actor JSON-LD document (includes DID in alsoKnownAs)
+│   ├── webfinger.js      # WebFinger endpoint (includes DID link)
 │   ├── inbox.js          # S2S inbox with HTTP Signature verification + SSRF protection
-│   ├── outbox.js         # Outbox + compose + follow/unfollow + local follow support
+│   ├── outbox.js         # Outbox + compose + follow/unfollow + local follow/delivery
 │   ├── collections.js    # Followers/following collections
 │   ├── httpsig.js        # HTTP Signature sign/verify with date staleness check
 │   ├── delivery.js       # Activity fan-out with SSRF protection
 │   ├── activities.js     # Activity processors (pending follow requests)
 │   └── remote.js         # Remote actor fetch with SSRF protection
+├── did/
+│   └── document.js       # DID document generation (did:web method)
 ├── i18n/
 │   ├── index.js          # Language resolution, translation lookup, caching
 │   ├── format.js         # Locale-aware date/number/bytes formatting (Intl APIs)
@@ -458,6 +475,7 @@ src/
 │   └── prefixes.js       # RDF prefix definitions
 ├── crypto/
 │   ├── rsa.js            # RSA keypair generation
+│   ├── keys.js           # PEM-to-JWK key conversion (shared by OIDC and DID)
 │   ├── digest.js         # SHA-256 digest
 │   └── cbor.js           # CBOR decoder (WebAuthn)
 ├── storage/
@@ -500,7 +518,7 @@ src/
 
 **WebID or actor URLs show `localhost:8787`** — Set `PAA_DOMAIN` to your production domain: `wrangler secret put PAA_DOMAIN`.
 
-**Domain mismatch after changing domains** — The server re-bootstraps all users when it detects a domain change, updating all IRIs. If you see issues, you may need to clear KV data and let it re-bootstrap fresh.
+**Domain mismatch after changing domains** — The server automatically migrates all storage keys (KV and R2) from the old domain to the new domain when it detects a change in `PAA_DOMAIN`. This rewrites URIs in both keys and values across TRIPLESTORE, APPDATA, and BLOBS.
 
 **Federation not working** — Your domain must be publicly accessible over HTTPS. Cloudflare Workers handle HTTPS automatically with custom domains. Check that WebFinger responds correctly: `curl https://yourdomain/.well-known/webfinger?resource=acct:youruser@yourdomain`.
 

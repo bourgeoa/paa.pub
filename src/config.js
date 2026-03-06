@@ -65,11 +65,14 @@ export function getConfig(env, request) {
  * @returns {object} user-specific config
  */
 export function getUserConfig(config, username) {
+  // did:web spec: port colons in domain become %3A
+  const encodedDomain = config.domain.replace(/:/g, '%3A');
   return {
     username,
     webId: `${config.baseUrl}/${username}/profile/card#me`,
     actorId: `${config.baseUrl}/${username}/profile/card#me`,
     keyId: `${config.baseUrl}/${username}/profile/card#main-key`,
+    did: `did:web:${encodedDomain}:${username}`,
   };
 }
 

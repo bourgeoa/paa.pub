@@ -197,8 +197,11 @@ Each entry: `{ id, name, configURL, clientId, issuer }`. Managed by the admin at
 
 | Key | Value | TTL |
 |---|---|---|
+| `system_initialized` | `"true"` | permanent |
 | `user_initialized` | `"true"` | permanent |
 | `bootstrap_domain` | `"example.com"` | permanent |
+
+`bootstrap_domain` tracks the domain used during the last bootstrap. When it differs from the current `PAA_DOMAIN`, the server migrates all storage keys from the old domain to the new one.
 
 ## BLOBS R2
 
@@ -230,3 +233,4 @@ These namespace prefixes are used throughout the codebase and in stored RDF data
 | `schema` | `https://schema.org/` |
 | `as` | `https://www.w3.org/ns/activitystreams#` |
 | `sec` | `https://w3id.org/security#` |
+| `owl` | `http://www.w3.org/2002/07/owl#` |

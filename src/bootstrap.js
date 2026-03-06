@@ -29,10 +29,19 @@ export async function ensureBootstrapped(env, config, storage) {
     // Check if domain changed since last bootstrap (or was never recorded)
     const storedDomain = await env.APPDATA.get('bootstrap_domain');
     if (storedDomain !== config.domain) {
-      console.log(`Bootstrap domain mismatch: stored=${storedDomain} current=${config.domain}, re-bootstrapping all users`);
-      const users = await listUsers(env.APPDATA);
-      for (const user of users) {
-        await bootstrapUser(env, config, user.username, storage);
+      if (storedDomain) {
+        // Domain changed — migrate storage keys from old to new domain
+        console.log(`Domain changed: ${storedDomain} → ${config.domain}, migrating storage keys`);
+        const oldProtocol = storedDomain.startsWith('localhost') ? 'http' : 'https';
+        const oldBaseUrl = `${oldProtocol}://${storedDomain}`;
+        await migrateDomainKeys(env, oldBaseUrl, config.baseUrl);
+      } else {
+        // First time recording domain — re-bootstrap for legacy installs
+        console.log('Recording bootstrap domain, re-bootstrapping all users');
+        const users = await listUsers(env.APPDATA);
+        for (const user of users) {
+          await bootstrapUser(env, config, user.username, storage);
+        }
       }
       await env.APPDATA.put('bootstrap_domain', config.domain);
     }
@@ -41,6 +50,7 @@ export async function ensureBootstrapped(env, config, storage) {
     for (const user of users) {
       await ensureAcpPolicies(env, config, user.username);
       await ensureTypeIndex(env, config, user.username, storage);
+      await ensureDidLink(env, config, user.username, storage);
     }
     bootstrapped = true;
     return;
@@ -369,13 +379,78 @@ async function ensureTypeIndex(env, config, username, storage) {
   }
 }
 
+/**
+ * Migrate all storage keys when the domain changes.
+ * Rewrites keys and URI references from old domain to new domain.
+ */
+async function migrateDomainKeys(env, oldBaseUrl, newBaseUrl) {
+  // Migrate TRIPLESTORE KV keys (idx:, doc:, acl:) — keys AND values contain URIs
+  for (const prefix of ['idx:', 'doc:', 'acl:']) {
+    await migrateKvKeys(env.TRIPLESTORE, `${prefix}${oldBaseUrl}/`, oldBaseUrl, newBaseUrl, true);
+  }
+
+  // Migrate APPDATA KV keys (acp:, container_quota:) — only keys contain URIs
+  for (const prefix of ['acp:', 'container_quota:']) {
+    await migrateKvKeys(env.APPDATA, `${prefix}${oldBaseUrl}/`, oldBaseUrl, newBaseUrl, false);
+  }
+
+  // Migrate R2 blob keys — only keys contain URIs (values are binary)
+  await migrateR2Keys(env.BLOBS, `blob:${oldBaseUrl}/`, oldBaseUrl, newBaseUrl);
+}
+
+async function migrateKvKeys(kv, prefix, oldBaseUrl, newBaseUrl, replaceValues) {
+  let cursor;
+  do {
+    const result = await kv.list({ prefix, cursor, limit: 500 });
+    for (const key of result.keys) {
+      const value = await kv.get(key.name, 'text');
+      if (value !== null) {
+        const newKey = key.name.replaceAll(oldBaseUrl, newBaseUrl);
+        const newValue = replaceValues ? value.replaceAll(oldBaseUrl, newBaseUrl) : value;
+        await kv.put(newKey, newValue);
+        if (newKey !== key.name) {
+          await kv.delete(key.name);
+        }
+      }
+    }
+    cursor = result.list_complete ? null : result.cursor;
+  } while (cursor);
+}
+
+async function migrateR2Keys(r2, prefix, oldBaseUrl, newBaseUrl) {
+  if (!r2) return;
+  let cursor;
+  do {
+    const result = await r2.list({ prefix, cursor, limit: 500 });
+    for (const obj of result.objects) {
+      const newKey = obj.key.replaceAll(oldBaseUrl, newBaseUrl);
+      if (newKey !== obj.key) {
+        const data = await r2.get(obj.key);
+        if (data) {
+          await r2.put(newKey, await data.arrayBuffer(), {
+            httpMetadata: data.httpMetadata,
+          });
+          await r2.delete(obj.key);
+        }
+      }
+    }
+    cursor = result.truncated ? result.cursor : null;
+  } while (cursor);
+}
+
 function buildProfileNTriples(profileIri, webId, username, baseUrl, publicPem) {
   const rdf = PREFIXES.rdf;
   const foaf = PREFIXES.foaf;
   const solid = PREFIXES.solid;
   const ldp = PREFIXES.ldp;
   const space = PREFIXES.space;
+  const owl = PREFIXES.owl;
   const keyId = `${profileIri}#main-key`;
+
+  // Compute did:web from baseUrl
+  const domain = baseUrl.replace(/^https?:\/\//, '');
+  const encodedDomain = domain.replace(/:/g, '%3A');
+  const did = `did:web:${encodedDomain}:${username}`;
 
   return [
     `${iri(webId)} ${iri(rdf + 'type')} ${iri(foaf + 'Person')} .`,
@@ -386,9 +461,31 @@ function buildProfileNTriples(profileIri, webId, username, baseUrl, publicPem) {
     `${iri(webId)} ${iri(ldp + 'inbox')} ${iri(baseUrl + '/' + username + '/inbox')} .`,
     `${iri(webId)} ${iri(solid + 'privateTypeIndex')} ${iri(baseUrl + '/' + username + '/settings/privateTypeIndex')} .`,
     `${iri(webId)} ${iri(solid + 'publicTypeIndex')} ${iri(baseUrl + '/' + username + '/settings/publicTypeIndex')} .`,
+    // DID link
+    `${iri(webId)} ${iri(owl + 'sameAs')} ${iri(did)} .`,
     // Security key for ActivityPub
     `${iri(keyId)} ${iri(rdf + 'type')} ${iri('https://w3id.org/security#Key')} .`,
     `${iri(keyId)} ${iri('https://w3id.org/security#owner')} ${iri(webId)} .`,
     `${iri(keyId)} ${iri('https://w3id.org/security#publicKeyPem')} ${literal(publicPem)} .`,
   ].join('\n');
+}
+
+/**
+ * Ensure the WebID profile has an owl:sameAs triple linking to the did:web DID.
+ * Migration for profiles created before DID support was added.
+ */
+async function ensureDidLink(env, config, username, storage) {
+  const { baseUrl } = config;
+  const webId = `${baseUrl}/${username}/profile/card#me`;
+  const profileIri = `${baseUrl}/${username}/profile/card`;
+  const owl = PREFIXES.owl;
+
+  const profileDoc = await storage.get(`doc:${profileIri}:${webId}`);
+  if (profileDoc && !profileDoc.includes('owl#sameAs')) {
+    const domain = baseUrl.replace(/^https?:\/\//, '');
+    const encodedDomain = domain.replace(/:/g, '%3A');
+    const did = `did:web:${encodedDomain}:${username}`;
+    const didTriple = `${iri(webId)} ${iri(owl + 'sameAs')} ${iri(did)} .`;
+    await storage.put(`doc:${profileIri}:${webId}`, profileDoc + '\n' + didTriple);
+  }
 }

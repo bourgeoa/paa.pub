@@ -16,6 +16,7 @@ export const PREFIXES = {
   schema: 'https://schema.org/',
   as: 'https://www.w3.org/ns/activitystreams#',
   sec: 'https://w3id.org/security#',
+  owl: 'http://www.w3.org/2002/07/owl#',
 };
 
 /** Shorten a full predicate IRI to a prefixed form (e.g. foaf:name). */
@@ -131,6 +132,9 @@ export const BUILTIN_NS_PREDICATES = {
   ]),
   [PREFIXES.space]: ns(PREFIXES.space, [
     'storage', 'preferencesFile', 'workspace',
+  ]),
+  [PREFIXES.owl]: ns(PREFIXES.owl, [
+    'sameAs',
   ]),
 };
 

@@ -129,12 +129,15 @@ src/
 |   +-- actor.js          Actor document (JSON-LD, content-negotiated)
 |   +-- webfinger.js      WebFinger discovery endpoint
 |   +-- inbox.js          S2S inbox with HTTP Signature verification
-|   +-- outbox.js         Outbox collection and compose/follow/unfollow
+|   +-- outbox.js         Outbox collection, compose, follow/unfollow, local delivery
 |   +-- collections.js    Followers/following OrderedCollections
 |   +-- httpsig.js        HTTP Signature signing and verification
 |   +-- delivery.js       Activity fan-out via waitUntil()
 |   +-- activities.js     Activity type processors and builders
 |   +-- remote.js         Remote actor fetch with KV cache
+|
++-- did/                  Decentralized Identifiers
+|   +-- document.js       DID document generation (did:web method)
 |
 +-- rdf/                  RDF processing
 |   +-- turtle-parser.js  Turtle parser (subset)
@@ -144,6 +147,7 @@ src/
 |
 +-- crypto/               Cryptographic primitives (Web Crypto API)
 |   +-- rsa.js            RSA-2048 key generation, signing, verification
+|   +-- keys.js           PEM-to-JWK key conversion (shared by OIDC and DID)
 |   +-- digest.js         SHA-256 digest utilities
 |   +-- cbor.js           Minimal CBOR decoder (for WebAuthn)
 |

@@ -67,6 +67,7 @@ async function actorJson(reqCtx, username) {
     preferredUsername: username,
     name: username,
     url: `${config.baseUrl}/${username}/profile/card`,
+    alsoKnownAs: [uc.did],
     publicKey: {
       id: uc.keyId,
       owner: uc.actorId,
@@ -103,7 +104,7 @@ async function profileRdf(reqCtx, username) {
   }
   const accept = request.headers.get('Accept') || 'text/turtle';
   const contentType = negotiateType(accept);
-  const body = serializeRdf(triples, contentType, ['foaf', 'solid', 'ldp', 'space', 'rdf']);
+  const body = serializeRdf(triples, contentType, ['foaf', 'solid', 'ldp', 'space', 'rdf', 'owl']);
 
   const headers = solidHeaders(profileIri, false);
   headers.set('Content-Type', contentType);

@@ -34,6 +34,10 @@ export async function handleWebFinger(reqCtx) {
 
   const jrd = {
     subject: resource,
+    aliases: [
+      uc.actorId,
+      uc.did,
+    ],
     links: [
       {
         rel: 'self',
@@ -44,6 +48,11 @@ export async function handleWebFinger(reqCtx) {
         rel: 'http://webfinger.net/rel/profile-page',
         type: 'text/html',
         href: `${config.baseUrl}/${username}/profile/card`,
+      },
+      {
+        rel: 'self',
+        type: 'application/did+ld+json',
+        href: `${config.baseUrl}/${username}/did.json`,
       },
     ],
   };
